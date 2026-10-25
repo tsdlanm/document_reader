@@ -7,8 +7,8 @@ import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.text.LineBreaker;
 import android.os.Build;
-import android.text.Layout;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.style.BackgroundColorSpan;
@@ -411,7 +411,8 @@ public final class DocxAdapter extends BaseAdapter {
     @TargetApi(26)
     private static final class Justify {
         static void set(TextView tv, boolean on) {
-            tv.setJustificationMode(on ? Layout.JUSTIFICATION_MODE_INTER_WORD : Layout.JUSTIFICATION_MODE_NONE);
+            // LineBreaker constants are compile-time ints, identical to the API 26 Layout ones.
+            tv.setJustificationMode(on ? LineBreaker.JUSTIFICATION_MODE_INTER_WORD : LineBreaker.JUSTIFICATION_MODE_NONE);
         }
     }
 }

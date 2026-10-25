@@ -115,7 +115,7 @@ public final class ViewerActivity extends Activity {
         name = FileSource.displayName(this, uri);
         setTitle(TextUtils.isEmpty(name) ? getString(R.string.app_name) : name);
 
-        if (needsStoragePermission()) {
+        if (Build.VERSION.SDK_INT >= 23 && needsStoragePermission()) {
             requestPermissions(new String[]{Manifest.permission.READ_EXTERNAL_STORAGE}, REQUEST_STORAGE);
         } else {
             load();
