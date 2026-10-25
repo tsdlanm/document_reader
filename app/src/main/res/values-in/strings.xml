@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Pembaca Dokumen</string>
+    <string name="open_file">Buka file</string>
+    <string name="supported_formats">PDF · Word (.docx) · Excel (.xlsx)</string>
+    <string name="recent_files">File terbaru</string>
+    <string name="no_recent">Belum ada file terbaru.\nKetuk \"Buka file\" untuk membaca dokumen PDF, Word, atau Excel.</string>
+    <string name="remove_recent">Hapus dari daftar</string>
+    <string name="clear_recent">Kosongkan daftar</string>
+    <string name="error_no_picker">Tidak ada pemilih file di perangkat ini.</string>
+    <string name="error_open">File ini tidak dapat dibuka. Mungkin file rusak.</string>
+    <string name="error_unsupported">Jenis file ini tidak didukung. Yang didukung: PDF, Word (.docx), dan Excel (.xlsx).</string>
+    <string name="error_legacy_doc">File Word lama (.doc) belum didukung. Simpan ulang sebagai .docx lalu coba lagi.</string>
+    <string name="error_legacy_xls">File Excel lama (.xls) belum didukung. Simpan ulang sebagai .xlsx lalu coba lagi.</string>
+    <string name="error_pdf_password">PDF yang dilindungi kata sandi belum didukung.</string>
+    <string name="error_permission">Izin penyimpanan diperlukan untuk membuka file ini.</string>
+    <string name="error_not_found">File tidak ditemukan atau tidak bisa diakses lagi. Buka ulang lewat \"Buka file\".</string>
+    <string name="error_too_large">File ini terlalu besar untuk memori perangkat ini.</string>
+    <string name="page_of">Halaman %1$d dari %2$d</string>
+    <string name="go_to_page">Ke halaman</string>
+    <string name="page_hint">1 – %d</string>
+    <string name="text_bigger">A+</string>
+    <string name="text_smaller">A−</string>
+    <string name="empty_document">Dokumen ini tidak berisi teks.</string>
+    <string name="sheet_empty">Lembar ini kosong.</string>
+    <string name="sheet_truncated">Lembar ini sangat besar; hanya bagian awal yang ditampilkan.</string>
+    <string name="tap_cell">Ketuk sel untuk melihat isi lengkapnya.</string>
+</resources>

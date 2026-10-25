@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Framework Material theme: no AppCompat library needed. -->
+    <style name="BaseTheme" parent="android:Theme.Material.Light.DarkActionBar">
+        <item name="android:colorPrimary">#1565C0</item>
+        <item name="android:colorPrimaryDark">#0D47A1</item>
+        <item name="android:colorAccent">#1E88E5</item>
+        <item name="android:windowBackground">@color/window_background</item>
+    </style>
+
+    <style name="AppTheme" parent="BaseTheme" />
+
+</resources>
