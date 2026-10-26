@@ -15,7 +15,7 @@ val releaseProps = Properties().apply {
 
 android {
     namespace = "com.tsdlanm.documentreader"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.tsdlanm.documentreader"
