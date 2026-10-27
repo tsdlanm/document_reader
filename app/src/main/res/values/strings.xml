@@ -24,5 +24,8 @@
     <string name="empty_document">This document has no text.</string>
     <string name="sheet_empty">This sheet is empty.</string>
     <string name="sheet_truncated">The sheet is very large; only the first part is shown.</string>
+    <string name="copied">Copied</string>
+    <string name="reading_mode">Reading mode</string>
+    <string name="page_mode">Page layout</string>
     <string name="tap_cell">Tap a cell to see its full content.</string>
 </resources>

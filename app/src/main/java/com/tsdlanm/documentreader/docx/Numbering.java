@@ -17,6 +17,10 @@ final class Numbering {
         String format = "decimal";
         String text = "%1.";
         int start = 1;
+        /** Indents in twips from the level's pPr, -1 when not given. */
+        int left = -1, hanging = -1;
+        /** What follows the marker: tab, space or nothing. */
+        String suffix = "tab";
     }
 
     private final Map<String, Level[]> abstracts = new HashMap<>();
@@ -66,6 +70,20 @@ final class Numbering {
                         level.text = v == null ? "" : v;
                     }
                     break;
+                case "suff":
+                    if (level != null) {
+                        String v = XmlUtil.attr(p, "val");
+                        if (v != null) level.suffix = v;
+                    }
+                    break;
+                case "ind":
+                    if (level != null) {
+                        String l = XmlUtil.attr(p, "left");
+                        if (l == null) l = XmlUtil.attr(p, "start");
+                        level.left = XmlUtil.parseInt(l, level.left);
+                        level.hanging = XmlUtil.intAttr(p, "hanging", level.hanging);
+                    }
+                    break;
                 case "num":
                     currentNum = XmlUtil.attr(p, "numId");
                     break;
@@ -76,6 +94,27 @@ final class Numbering {
                     break;
             }
         }
+    }
+
+    private Level level(String numId, int ilvl) {
+        if (numId == null || ilvl < 0 || ilvl > 8) return null;
+        String abs = numToAbstract.get(numId);
+        Level[] levels = abs == null ? null : abstracts.get(abs);
+        return levels == null ? null : levels[ilvl];
+    }
+
+    /** Left indent and hanging indent (twips) of a list level, or null when it sets none. */
+    int[] indent(String numId, int ilvl) {
+        Level l = level(numId, ilvl);
+        if (l == null || (l.left < 0 && l.hanging < 0)) return null;
+        return new int[]{l.left, l.hanging};
+    }
+
+    /** Separator after the marker: "\t", " " or "". */
+    String suffix(String numId, int ilvl) {
+        Level l = level(numId, ilvl);
+        if (l == null || "tab".equals(l.suffix)) return "\t";
+        return "space".equals(l.suffix) ? " " : "";
     }
 
     /** Returns the marker for the next item of list {@code numId} at {@code ilvl}, or null. */

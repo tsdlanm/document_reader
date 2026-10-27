@@ -24,5 +24,8 @@
     <string name="empty_document">Dokumen ini tidak berisi teks.</string>
     <string name="sheet_empty">Lembar ini kosong.</string>
     <string name="sheet_truncated">Lembar ini sangat besar; hanya bagian awal yang ditampilkan.</string>
+    <string name="copied">Disalin</string>
+    <string name="reading_mode">Mode baca</string>
+    <string name="page_mode">Tampilan halaman</string>
     <string name="tap_cell">Ketuk sel untuk melihat isi lengkapnya.</string>
 </resources>

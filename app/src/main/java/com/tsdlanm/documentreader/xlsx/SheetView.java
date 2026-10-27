@@ -1,15 +1,22 @@
 package com.tsdlanm.documentreader.xlsx;
 
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Typeface;
+import android.os.Build;
 import android.view.GestureDetector;
+import android.view.HapticFeedbackConstants;
 import android.view.MotionEvent;
 import android.view.ScaleGestureDetector;
 import android.view.View;
 import android.widget.OverScroller;
+import android.widget.Toast;
+
+import com.tsdlanm.documentreader.R;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -101,6 +108,13 @@ public final class SheetView extends View {
             public boolean onDoubleTap(MotionEvent e) {
                 zoomAround(zoom < 1.4f ? 2f : 1f, e.getX(), e.getY());
                 return true;
+            }
+
+            @Override
+            public void onLongPress(MotionEvent e) {
+                if (scaling) return;
+                selectAt(e.getX(), e.getY());
+                copyCell();
             }
         });
         scaleGestures = new ScaleGestureDetector(context, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
@@ -213,6 +227,19 @@ public final class SheetView extends View {
         selCol = c;
         invalidate();
         if (listener != null) listener.onCellSelected(r, c, data.text(r, c));
+    }
+
+    /** Copies the selected cell's text to the clipboard. */
+    private void copyCell() {
+        if (data == null || selRow < 0) return;
+        String text = data.text(selRow, selCol);
+        if (text == null || text.isEmpty()) return;
+        ClipboardManager cm = (ClipboardManager) getContext().getSystemService(Context.CLIPBOARD_SERVICE);
+        if (cm == null) return;
+        cm.setPrimaryClip(ClipData.newPlainText("cell", text));
+        performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+        // Android 13+ shows its own confirmation.
+        if (Build.VERSION.SDK_INT < 33) Toast.makeText(getContext(), R.string.copied, Toast.LENGTH_SHORT).show();
     }
 
     private int[] mergeAt(int r, int c) {

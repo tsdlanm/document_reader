@@ -67,7 +67,7 @@ public class DocxParserTest {
             assertNotNull(table);
             assertEquals(2, table.rows.size());
             assertEquals(3, table.columnCount());
-            Paragraph cell = (Paragraph) table.rows.get(1).get(2).blocks.get(0);
+            Paragraph cell = (Paragraph) table.rows.get(1).cells.get(2).blocks.get(0);
             assertEquals("R1C2", cell.plainText());
 
             assertNotNull(image);

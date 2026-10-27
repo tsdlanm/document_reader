@@ -3,7 +3,6 @@ package com.tsdlanm.documentreader.docx;
 import android.annotation.TargetApi;
 import android.content.Context;
 import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -34,13 +33,13 @@ import com.tsdlanm.documentreader.docx.DocModel.Block;
 import com.tsdlanm.documentreader.docx.DocModel.Cell;
 import com.tsdlanm.documentreader.docx.DocModel.Image;
 import com.tsdlanm.documentreader.docx.DocModel.Paragraph;
+import com.tsdlanm.documentreader.docx.DocModel.Row;
 import com.tsdlanm.documentreader.docx.DocModel.Run;
 import com.tsdlanm.documentreader.docx.DocModel.Table;
 import com.tsdlanm.documentreader.util.Tasks;
 
-import java.io.InputStream;
+import java.util.ArrayList;
 import java.util.List;
-import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
 /**
@@ -63,7 +62,13 @@ public final class DocxAdapter extends BaseAdapter {
 
     public DocxAdapter(Context context, DocModel.Document doc, ZipFile zip, int contentWidthPx) {
         this.context = context;
-        this.blocks = doc.blocks;
+        // Page and section breaks mean nothing in this flowing view.
+        this.blocks = new ArrayList<>();
+        for (Block b : doc.blocks) {
+            if (b instanceof Paragraph || b instanceof Image || b instanceof Table) blocks.add(b);
+            // Text boxes simply follow in reading order.
+            else if (b instanceof DocModel.TextBox) blocks.addAll(((DocModel.TextBox) b).blocks);
+        }
         this.defaultPoints = Math.max(1, doc.defaultHalfPoints / 2f);
         this.zip = zip;
         this.density = context.getResources().getDisplayMetrics().density;
@@ -159,6 +164,8 @@ public final class DocxAdapter extends BaseAdapter {
         TextView tv = new TextView(context);
         tv.setTextColor(TEXT_COLOR);
         tv.setLineSpacing(0, 1.15f);
+        // Long-press to select and copy, with the system's own handles and toolbar.
+        tv.setTextIsSelectable(true);
         tv.setLayoutParams(new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
         return tv;
@@ -183,7 +190,7 @@ public final class DocxAdapter extends BaseAdapter {
             Justify.set(tv, p.align == DocModel.ALIGN_JUSTIFY);
         }
         // Twips to dp, scaled down for small screens and capped.
-        int indent = Math.min(dp(96), dp(p.indent / 1440f * 96f * 0.5f));
+        int indent = Math.min(dp(96), dp(Math.max(0, p.indLeft) / 1440f * 96f * 0.5f));
         int top = topLevel ? (p.heading > 0 ? dp(10) : dp(2)) : 0;
         int bottom = topLevel ? dp(p.heading > 0 ? 6 : 4) : dp(2);
         tv.setPadding(indent, top, 0, bottom);
@@ -272,46 +279,13 @@ public final class DocxAdapter extends BaseAdapter {
         iv.setImageDrawable(null);
         final int targetW = w;
         Tasks.io().execute(() -> {
-            final Bitmap bmp = decode(img.part, targetW);
+            final Bitmap bmp = ZipImages.decode(zip, img.part, targetW);
             Tasks.main(() -> {
                 if (bmp == null) return;
                 images.put(key, bmp);
                 if (key.equals(iv.getTag())) iv.setImageBitmap(bmp);
             });
         });
-    }
-
-    /** Decodes with a sample size so the bitmap is about as wide as it is shown. */
-    private Bitmap decode(String part, int targetW) {
-        try {
-            ZipEntry e = zip.getEntry(part);
-            if (e == null || e.getSize() > 30L * 1024 * 1024) return null;
-            BitmapFactory.Options o = new BitmapFactory.Options();
-            o.inJustDecodeBounds = true;
-            InputStream in = zip.getInputStream(e);
-            try {
-                BitmapFactory.decodeStream(in, null, o);
-            } finally {
-                in.close();
-            }
-            if (o.outWidth <= 0 || o.outHeight <= 0) return null;
-            int sample = 1;
-            while (o.outWidth / (sample * 2) >= targetW) sample *= 2;
-            // Also keep tall images within a sane pixel budget.
-            while ((long) (o.outWidth / sample) * (o.outHeight / sample) > 2_500_000L) sample *= 2;
-            BitmapFactory.Options d = new BitmapFactory.Options();
-            d.inSampleSize = sample;
-            d.inPreferredConfig = Bitmap.Config.RGB_565;
-            in = zip.getInputStream(e);
-            try {
-                return BitmapFactory.decodeStream(in, null, d);
-            } finally {
-                in.close();
-            }
-        } catch (Exception | OutOfMemoryError ex) {
-            // EMF/WMF and corrupt images cannot be decoded; leave them out.
-            return null;
-        }
     }
 
     // ---------------------------------------------------------------- tables
@@ -334,12 +308,12 @@ public final class DocxAdapter extends BaseAdapter {
         LinearLayout table = new LinearLayout(context);
         table.setOrientation(LinearLayout.VERTICAL);
         int line = Math.max(1, Math.round(density));
-        for (List<Cell> row : t.rows) {
+        for (Row row : t.rows) {
             LinearLayout tr = new LinearLayout(context);
             tr.setOrientation(LinearLayout.HORIZONTAL);
             tr.setBaselineAligned(false);
             int col = 0;
-            for (Cell c : row) {
+            for (Cell c : row.cells) {
                 int span = Math.min(c.span, cols - col);
                 if (span <= 0) break;
                 int w = 0;

@@ -34,8 +34,10 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import com.tsdlanm.documentreader.docx.DocModel;
+import com.tsdlanm.documentreader.docx.DocPageView;
 import com.tsdlanm.documentreader.docx.DocxAdapter;
 import com.tsdlanm.documentreader.docx.DocxParser;
+import com.tsdlanm.documentreader.docx.PageLayout;
 import com.tsdlanm.documentreader.pdf.PdfEngine;
 import com.tsdlanm.documentreader.pdf.PdfView;
 import com.tsdlanm.documentreader.util.AndroidXml;
@@ -47,12 +49,14 @@ import com.tsdlanm.documentreader.xlsx.XlsxWorkbook;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.zip.ZipFile;
 
 /** Opens one document and shows it with the matching viewer. */
 public final class ViewerActivity extends Activity {
     private static final int REQUEST_STORAGE = 2;
-    private static final int MENU_GO_TO = 1, MENU_BIGGER = 2, MENU_SMALLER = 3;
+    private static final int MENU_GO_TO = 1, MENU_BIGGER = 2, MENU_SMALLER = 3, MENU_MODE = 4;
 
     /** Everything produced by the background load; owned by the activity once delivered. */
     private static final class Loaded {
@@ -63,6 +67,8 @@ public final class ViewerActivity extends Activity {
         ZipFile zip;
         File temp;
         DocModel.Document doc;
+        /** Print layout of {@link #doc} (laid out after loading); null if it failed or is empty. */
+        PageLayout pages;
         XlsxWorkbook workbook;
         SheetData firstSheet;
     }
@@ -76,6 +82,7 @@ public final class ViewerActivity extends Activity {
 
     private Loaded loaded;
     private PdfView pdfView;
+    private DocPageView docPages;
     private ListView docList;
     private DocxAdapter docAdapter;
     private SheetView sheetView;
@@ -115,7 +122,7 @@ public final class ViewerActivity extends Activity {
         name = FileSource.displayName(this, uri);
         setTitle(TextUtils.isEmpty(name) ? getString(R.string.app_name) : name);
 
-        if (Build.VERSION.SDK_INT >= 23 && needsStoragePermission()) {
+        if (needsStoragePermission()) {
             requestPermissions(new String[]{Manifest.permission.READ_EXTERNAL_STORAGE}, REQUEST_STORAGE);
         } else {
             load();
@@ -132,7 +139,7 @@ public final class ViewerActivity extends Activity {
     }
 
     private boolean needsStoragePermission() {
-        return "file".equals(uri.getScheme()) && Build.VERSION.SDK_INT >= 23 && Build.VERSION.SDK_INT <= 32
+        return "file".equals(uri.getScheme()) && Build.VERSION.SDK_INT <= 32
                 && checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED;
     }
 
@@ -179,6 +186,8 @@ public final class ViewerActivity extends Activity {
                     if (DocxParser.isDocx(r.zip)) {
                         r.type = DocumentType.DOCX;
                         r.doc = DocxParser.parse(r.zip, AndroidXml.INSTANCE);
+                        // Pages are laid out later, while the first ones are already shown.
+                        if (!r.doc.blocks.isEmpty()) r.pages = PageLayout.create(r.doc);
                     } else if (XlsxWorkbook.isXlsx(r.zip)) {
                         r.type = DocumentType.XLSX;
                         r.workbook = XlsxWorkbook.open(r.zip, AndroidXml.INSTANCE);
@@ -267,6 +276,7 @@ public final class ViewerActivity extends Activity {
         r.pdf = null;
         r.zip = null;
         r.doc = null;
+        r.pages = null;
         r.workbook = null;
         r.firstSheet = null;
     }
@@ -341,8 +351,8 @@ public final class ViewerActivity extends Activity {
     }
 
     private void askPage() {
-        if (pdfView == null) return;
-        final int count = pdfView.getPageCount();
+        if (pdfView == null && docPages == null) return;
+        final int count = pdfView != null ? pdfView.getPageCount() : docPages.getPageCount();
         final EditText input = new EditText(this);
         input.setInputType(InputType.TYPE_CLASS_NUMBER);
         input.setHint(getString(R.string.page_hint, count));
@@ -356,8 +366,9 @@ public final class ViewerActivity extends Activity {
                 .setNegativeButton(android.R.string.cancel, null)
                 .setPositiveButton(android.R.string.ok, (d, which) -> {
                     try {
-                        int page = Integer.parseInt(input.getText().toString().trim());
-                        pdfView.goToPage(Math.max(1, Math.min(count, page)) - 1);
+                        int page = Math.max(1, Math.min(count, Integer.parseInt(input.getText().toString().trim())));
+                        if (pdfView != null) pdfView.goToPage(page - 1);
+                        else if (docPages != null) docPages.goToPage(page - 1);
                     } catch (NumberFormatException ignored) {
                     }
                 })
@@ -375,6 +386,83 @@ public final class ViewerActivity extends Activity {
             showMessage(getString(R.string.empty_document));
             return;
         }
+        if (r.pages != null) showDocPages();
+        else showDocList();
+    }
+
+    /** Pages laid out so far (UI thread), kept for switching back from reading mode. */
+    private final List<PageLayout.Page> laidOut = new ArrayList<>();
+    private boolean layoutStarted, layoutDone;
+
+    /** Print layout: pages like in Word. */
+    private void showDocPages() {
+        docPages = new DocPageView(this);
+        docPages.setDocument(loaded.pages, loaded.zip);
+        docPages.addPages(laidOut);
+        docPages.setOnPageChangeListener(page -> updatePageSubtitle());
+        root.addView(docPages, 0, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT));
+        if (!layoutStarted) startLayout(loaded.pages);
+    }
+
+    /** Lays the pages out in the background, showing each batch as soon as it is ready. */
+    private void startLayout(final PageLayout l) {
+        layoutStarted = true;
+        Tasks.io().execute(() -> {
+            try {
+                l.layout(batch -> Tasks.main(() -> {
+                    if (destroyed || loaded == null || loaded.pages != l) return;
+                    laidOut.addAll(batch);
+                    if (docPages != null) docPages.addPages(batch);
+                    updatePageSubtitle();
+                    invalidateOptionsMenu();
+                }));
+                Tasks.main(() -> {
+                    if (destroyed || loaded == null || loaded.pages != l) return;
+                    layoutDone = true;
+                    updatePageSubtitle();
+                });
+            } catch (RuntimeException | OutOfMemoryError e) {
+                // Page layout failed: fall back to the flowing reading mode.
+                Tasks.main(() -> {
+                    if (destroyed || loaded == null || loaded.pages != l) return;
+                    if (docPages != null) toggleDocMode();
+                    loaded.pages = null;
+                    invalidateOptionsMenu();
+                });
+            }
+        });
+    }
+
+    private void updatePageSubtitle() {
+        ActionBar bar = getActionBar();
+        if (bar == null || docPages == null || laidOut.isEmpty()) return;
+        String text = getString(R.string.page_of, docPages.getCurrentPage() + 1, laidOut.size());
+        // More pages are still on the way.
+        bar.setSubtitle(layoutDone ? text : text + "…");
+    }
+
+    /** Switches between print layout and the flowing reading mode. */
+    private void toggleDocMode() {
+        if (docPages != null) {
+            root.removeView(docPages);
+            docPages.release();
+            docPages = null;
+            ActionBar bar = getActionBar();
+            if (bar != null) bar.setSubtitle(null);
+            showDocList();
+        } else if (loaded.pages != null) {
+            root.removeView(docList);
+            if (docAdapter != null) docAdapter.release();
+            docList = null;
+            docAdapter = null;
+            showDocPages();
+        }
+        invalidateOptionsMenu();
+    }
+
+    /** Reading mode: text reflowed to the screen width. */
+    private void showDocList() {
         docList = new ListView(this);
         docList.setBackgroundColor(Color.WHITE);
         docList.setDivider(null);
@@ -521,12 +609,16 @@ public final class ViewerActivity extends Activity {
 
     @Override
     public boolean onCreateOptionsMenu(Menu menu) {
-        if (pdfView != null && pdfView.getPageCount() > 1) {
+        if ((pdfView != null && pdfView.getPageCount() > 1) || (docPages != null && docPages.getPageCount() > 1)) {
             menu.add(0, MENU_GO_TO, 0, R.string.go_to_page).setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM);
         }
         if (docAdapter != null) {
             menu.add(0, MENU_SMALLER, 0, R.string.text_smaller).setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM);
             menu.add(0, MENU_BIGGER, 0, R.string.text_bigger).setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM);
+        }
+        if (loaded != null && loaded.pages != null && (docPages != null || docList != null)) {
+            menu.add(0, MENU_MODE, 0, docPages != null ? R.string.reading_mode : R.string.page_mode)
+                    .setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER);
         }
         return true;
     }
@@ -539,6 +631,9 @@ public final class ViewerActivity extends Activity {
                 return true;
             case MENU_GO_TO:
                 askPage();
+                return true;
+            case MENU_MODE:
+                toggleDocMode();
                 return true;
             case MENU_BIGGER:
                 if (docAdapter != null) docAdapter.setTextScale(docAdapter.getTextScale() + 0.15f);
@@ -562,6 +657,7 @@ public final class ViewerActivity extends Activity {
     protected void onDestroy() {
         destroyed = true;
         if (pdfView != null) pdfView.release();
+        if (docPages != null) docPages.release();
         if (docAdapter != null) docAdapter.release();
         if (loaded != null) closeLoaded(getApplicationContext(), loaded);
         super.onDestroy();

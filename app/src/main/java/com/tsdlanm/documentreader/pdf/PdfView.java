@@ -72,8 +72,9 @@ public final class PdfView extends View {
         scroller = new OverScroller(context);
         setBackgroundColor(BACKGROUND);
 
-        // Keep page bitmaps within a quarter of the heap (pre-Android 8 bitmaps live on the heap).
-        int maxKb = (int) Math.min(Integer.MAX_VALUE, Runtime.getRuntime().maxMemory() / 1024 / 4);
+        // A few screen-wide pages (PdfRenderer needs ARGB_8888, ~6 MB each): enough for the visible
+        // pages and their neighbours. Capped, as a share of the heap alone grew to 128 MB.
+        int maxKb = (int) Math.min(32 * 1024, Runtime.getRuntime().maxMemory() / 1024 / 6);
         cache = new LruCache<Integer, Bitmap>(maxKb) {
             @Override
             protected int sizeOf(Integer key, Bitmap value) {
