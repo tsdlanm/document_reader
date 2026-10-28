@@ -16,8 +16,9 @@ public final class SheetData {
         double[] nums;
         String[] texts = new String[4];
         char[] styles = new char[4];
-        /** Custom height in points, or 0 for the default; -1 for a hidden row. */
+        /** Custom height in points, or 0 for the default. */
         float height;
+        boolean hidden;
 
         void add(int col, byte kind, String text, double num, int style) {
             if (size > 0 && cols[size - 1] >= col) {
@@ -85,6 +86,61 @@ public final class SheetData {
     public int frozenRows, frozenCols;
     /** First row and column shown when the file was saved (Excel opens scrolled there). */
     public int topRow, topCol;
+    /**
+     * AutoFilter range {firstRow, firstCol, lastRow, lastCol}, or null; its first row holds the
+     * headers with the filter buttons. {@link #filters} maps a column to the texts shown (a
+     * missing column shows everything); "" stands for empty cells.
+     */
+    public int[] filterRange;
+    public final java.util.Map<Integer, java.util.Set<String>> filters = new java.util.HashMap<>();
+    /** Heights the rows below the filter header have when shown. */
+    float[] filterHeights;
+
+    /** Sorted distinct texts of a column below the filter header ("" for empty cells). */
+    public List<String> filterValues(int col) {
+        java.util.TreeSet<String> out = new java.util.TreeSet<>(NATURAL);
+        for (int r = filterRange[0] + 1; r <= filterRange[2] && r < rowCount; r++) {
+            String t = text(r, col);
+            out.add(t == null ? "" : t);
+        }
+        return new ArrayList<>(out);
+    }
+
+    /** Shows the rows matching every column's filter and hides the others. */
+    public void applyFilter() {
+        if (filterRange == null || filterHeights == null) return;
+        for (int r = filterRange[0] + 1; r <= filterRange[2] && r < rowCount; r++) {
+            boolean shown = true;
+            for (java.util.Map.Entry<Integer, java.util.Set<String>> f : filters.entrySet()) {
+                String t = text(r, f.getKey());
+                if (!f.getValue().contains(t == null ? "" : t)) {
+                    shown = false;
+                    break;
+                }
+            }
+            rowHeights[r] = shown ? filterHeights[r - filterRange[0] - 1] : 0;
+        }
+    }
+
+    /** Numbers in numeric order, then text, as Excel lists filter values; empty last. */
+    private static final java.util.Comparator<String> NATURAL = (a, b) -> {
+        if (a.isEmpty() || b.isEmpty()) return a.isEmpty() ? (b.isEmpty() ? 0 : 1) : -1;
+        Double x = number(a), y = number(b);
+        if (x != null && y != null) return x.compareTo(y) != 0 ? x.compareTo(y) : a.compareTo(b);
+        if (x != null) return -1;
+        if (y != null) return 1;
+        int c = a.compareToIgnoreCase(b);
+        return c != 0 ? c : a.compareTo(b);
+    };
+
+    private static Double number(String s) {
+        try {
+            return Double.valueOf(s.replace(",", ""));
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
     /** Pictures and charts floating over the cells. */
     public final List<Picture> pictures = new ArrayList<>();
 

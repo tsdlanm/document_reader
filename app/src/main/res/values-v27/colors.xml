@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Android 8.1+ can draw dark navigation buttons, so the bar matches the app. -->
+    <color name="nav_bar">@color/window_background</color>
+</resources>

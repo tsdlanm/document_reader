@@ -56,7 +56,9 @@ public class XlsxFormattingTest {
                     + "<c r=\"B1\" s=\"1\"/><c r=\"C1\" s=\"2\"><v>5</v></c></row>"
                     + "<row r=\"4\"><c r=\"A4\"><v>1</v></c><c r=\"B4\"><v>2</v></c>"
                     + "<c r=\"C4\" s=\"2\" t=\"s\"><v>0</v></c><c r=\"D4\" s=\"3\" t=\"inlineStr\"><is><t>UAS</t></is></c>"
-                    + "<c r=\"E4\" t=\"s\"><v>1</v></c></row></sheetData>"
+                    + "<c r=\"E4\" t=\"s\"><v>1</v></c></row>"
+                    + "<row r=\"5\" hidden=\"1\" ht=\"20\" customHeight=\"1\"><c r=\"A5\"><v>7</v></c></row></sheetData>"
+                    + "<autoFilter ref=\"A3:B5\"><filterColumn colId=\"0\"><filters><filter val=\"1\"/></filters></filterColumn></autoFilter>"
                     + "<drawing r:id=\"rD\"/></worksheet>");
             put(z, "xl/worksheets/_rels/sheet1.xml.rels", "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
                     + "<Relationship Id=\"rD\" Type=\"" + REL + "drawing\" Target=\"../drawings/drawing1.xml\"/></Relationships>");
@@ -122,6 +124,24 @@ public class XlsxFormattingTest {
         assertEquals("Total: 42", s.text(3, 4));
         assertFalse(s.style(3, 4).bold);
         assertEquals(1f, s.style(3, 4).fontSize, 0.001f);
+    }
+
+    @Test
+    public void autoFilterHidesAndShowsRows() throws Exception {
+        SheetData s = load();
+        assertEquals(2, s.filterRange[0]);
+        assertEquals(1, s.filterRange[3]);
+        assertTrue(s.filters.get(0).contains("1"));
+        // Row 5 was hidden by the saved filter; its height is kept for showing it again.
+        assertEquals(0f, s.rowHeights[4], 0.001f);
+        assertEquals(java.util.Arrays.asList("1", "7"), s.filterValues(0));
+        s.filters.remove(0);
+        s.applyFilter();
+        assertEquals(20f, s.rowHeights[4], 0.001f);
+        s.filters.put(0, new java.util.HashSet<>(java.util.Collections.singleton("7")));
+        s.applyFilter();
+        assertEquals(0f, s.rowHeights[3], 0.001f);
+        assertEquals(20f, s.rowHeights[4], 0.001f);
     }
 
     @Test

@@ -1,5 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <color name="icon_background">#FF1565C0</color>
-    <color name="window_background">#FFF5F5F5</color>
+
+    <!-- App chrome. Warm whites, never pure white or black; documents keep their own colours. -->
+    <color name="bar">#FFFAF7F2</color>
+    <color name="bar_text">#FF2E2A26</color>
+    <color name="window_background">#FFF3F0EB</color>
+    <!-- System navigation bar. Before Android 8.1 its buttons are always light, so it stays dark. -->
+    <color name="nav_bar">#FF2E2A26</color>
+    <!-- Around document pages. -->
+    <color name="page_background">#FFE6E2DC</color>
+    <color name="surface">#FFFDFBF8</color>
+    <color name="text_primary">#FF2E2A26</color>
+    <color name="text_secondary">#FF77716A</color>
+    <color name="divider">#FFE3DED7</color>
+    <color name="accent">#FF1A6FD6</color>
+    <color name="on_accent">#FFFDFBF8</color>
+    <color name="accent_soft">#FFE6EEFB</color>
+    <!-- Spreadsheet row and column headers. -->
+    <color name="header_bg">#FFF2EFEA</color>
+    <color name="header_line">#FFD3CDC5</color>
+    <color name="header_text">#FF6E6861</color>
+    <color name="header_selected">#FFD7E3F7</color>
 </resources>

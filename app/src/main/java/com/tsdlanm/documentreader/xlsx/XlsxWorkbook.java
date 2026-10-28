@@ -687,6 +687,9 @@ public final class XlsxWorkbook {
         int frozenRows = 0, frozenCols = 0;
         int[] topLeft = null;
         List<SheetData.Picture> pictures = new ArrayList<>();
+        int[] filterRange = null;
+        Map<Integer, java.util.Set<String>> filterCols = new HashMap<>();
+        java.util.BitSet hiddenRows = new java.util.BitSet();
 
         SheetData.Row row = null;
         int rowNum = -1;
@@ -749,13 +752,12 @@ public final class XlsxWorkbook {
                     }
                     row = new SheetData.Row();
                     String hidden = XmlUtil.attr(p, "hidden");
-                    if ("1".equals(hidden) || "true".equals(hidden)) row.height = -1;
-                    else {
-                        String custom = XmlUtil.attr(p, "customHeight");
-                        float ht = XmlUtil.floatAttr(p, "ht", 0f);
-                        if (ht > 0 && ("1".equals(custom) || "true".equals(custom) || ht > defaultRowHeight)) {
-                            row.height = Math.min(ht, 409f);
-                        }
+                    row.hidden = "1".equals(hidden) || "true".equals(hidden);
+                    // Hidden rows keep their height: a filter may show them again.
+                    String custom = XmlUtil.attr(p, "customHeight");
+                    float ht = XmlUtil.floatAttr(p, "ht", 0f);
+                    if (ht > 0 && ("1".equals(custom) || "true".equals(custom) || ht > defaultRowHeight)) {
+                        row.height = Math.min(ht, 409f);
                     }
                     rows.add(row);
                     rowIndex.add(rowNum);
@@ -793,6 +795,38 @@ public final class XlsxWorkbook {
                     }
                     break;
                 }
+                case "autoFilter": {
+                    filterRange = parseRange(XmlUtil.attr(p, "ref"));
+                    int d = p.getDepth();
+                    while (XmlUtil.nextChild(p, d)) {
+                        if (!"filterColumn".equals(p.getName()) || filterRange == null) {
+                            XmlUtil.skip(p);
+                            continue;
+                        }
+                        int col = filterRange[1] + XmlUtil.intAttr(p, "colId", 0);
+                        int d2 = p.getDepth();
+                        while (XmlUtil.nextChild(p, d2)) {
+                            // Only lists of values; custom, top-10 and colour filters stay as
+                            // the file saved them (its hidden rows).
+                            if (!"filters".equals(p.getName())) {
+                                XmlUtil.skip(p);
+                                continue;
+                            }
+                            java.util.Set<String> shown = new java.util.HashSet<>();
+                            if ("1".equals(XmlUtil.attr(p, "blank")) || "true".equals(XmlUtil.attr(p, "blank"))) shown.add("");
+                            int d3 = p.getDepth();
+                            while (XmlUtil.nextChild(p, d3)) {
+                                if ("filter".equals(p.getName())) {
+                                    String val = XmlUtil.attr(p, "val");
+                                    if (val != null) shown.add(val);
+                                }
+                                XmlUtil.skip(p);
+                            }
+                            filterCols.put(col, shown);
+                        }
+                    }
+                    break;
+                }
                 case "mergeCell": {
                     int[] m = parseRange(XmlUtil.attr(p, "ref"));
                     if (m != null) merges.add(m);
@@ -827,8 +861,8 @@ public final class XlsxWorkbook {
             int r = rowIndex.get(i);
             if (r >= rowArr.length) continue;
             SheetData.Row rr = rows.get(i);
-            if (rr.height < 0) heights[r] = 0;
-            else if (rr.height > 0) heights[r] = rr.height;
+            if (rr.height > 0) heights[r] = rr.height;
+            if (rr.hidden) hiddenRows.set(r);
             if (rr.size > 0) rowArr[r] = rr;
         }
         float[] widths = new float[Math.max(0, colCount)];
@@ -851,7 +885,16 @@ public final class XlsxWorkbook {
         data.defaultRowHeight = defaultRowHeight;
         data.defaultColWidth = defaultColWidth;
         data.pictures.addAll(pictures);
-        // A pane frozen beyond the data would pin the whole sheet.
+        if (filterRange != null && filterRange[0] < rowCount) {
+            int last = Math.min(filterRange[2], rowCount - 1);
+            filterRange[2] = last;
+            data.filterRange = filterRange;
+            data.filters.putAll(filterCols);
+            data.filterHeights = new float[Math.max(0, last - filterRange[0])];
+            for (int r = filterRange[0] + 1; r <= last; r++) data.filterHeights[r - filterRange[0] - 1] = heights[r];
+        }
+        // Hidden rows (by the user or the saved filter) show at zero height.
+        for (int r = hiddenRows.nextSetBit(0); r >= 0 && r < heights.length; r = hiddenRows.nextSetBit(r + 1)) heights[r] = 0;        // A pane frozen beyond the data would pin the whole sheet.
         data.frozenRows = Math.min(frozenRows, Math.max(0, rowCount - 1));
         data.frozenCols = Math.min(frozenCols, Math.max(0, colCount - 1));
         return data;

@@ -54,7 +54,8 @@ public final class DocPageView extends View {
     }
 
     private static final float MAX_ZOOM = 5f;
-    private static final int BACKGROUND = 0xFFDDDDDD;
+    /** Around the pages: the app's light or dark background. */
+    private final int BACKGROUND;
 
     private final float density;
     private final float gap;
@@ -80,6 +81,12 @@ public final class DocPageView extends View {
     private final Set<Integer> rendering = new HashSet<>();
     /** Pages drawn while one of their pictures was still loading; redrawn when it arrives. */
     private final Set<Integer> waitingForImages = new HashSet<>();
+    /**
+     * Pictures decoded so far (UI thread). A page or tile drawn while a picture was missing is
+     * redrawn at once if a picture arrived meanwhile: its arrival may have come before the page
+     * was registered as waiting, and would otherwise be missed until the next zoom.
+     */
+    private int imageArrivals;
     private final ExecutorService renderer = Executors.newSingleThreadExecutor(r -> new Thread(() -> {
         Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND);
         r.run();
@@ -91,6 +98,18 @@ public final class DocPageView extends View {
     private float contentH;
     private int viewW, viewH;
     private float zoom = 1f, sx, sy;
+    /**
+     * Space above the first page for the toolbar floating over the view: at the top the page
+     * starts below it; scrolled, the page passes under it. Pixels.
+     */
+    private int topInset;
+
+    public void setTopInset(int px) {
+        boolean atTop = sy <= 0;
+        topInset = px;
+        if (atTop) sy = -px;
+        invalidate();
+    }
     private boolean scaling, draggingThumb;
     private float thumbGrab;
     private int currentPage = -1;
@@ -113,6 +132,7 @@ public final class DocPageView extends View {
     public DocPageView(Context context) {
         super(context);
         density = getResources().getDisplayMetrics().density;
+        BACKGROUND = context.getColor(com.tsdlanm.documentreader.R.color.page_background);
         gap = 8 * density;
         white.setColor(Color.WHITE);
         edge.setColor(0xFFBDBDBD);
@@ -169,7 +189,7 @@ public final class DocPageView extends View {
             @Override
             public boolean onFling(MotionEvent e1, MotionEvent e2, float vx, float vy) {
                 if (scaling) return false;
-                scroller.fling((int) sx, (int) sy, (int) -vx, (int) -vy, 0, (int) maxScrollX(), 0, (int) maxScrollY());
+                scroller.fling((int) sx, (int) sy, (int) -vx, (int) -vy, 0, (int) maxScrollX(), -topInset, (int) maxScrollY());
                 postInvalidateOnAnimation();
                 return true;
             }
@@ -245,7 +265,7 @@ public final class DocPageView extends View {
     public void goToPage(int index) {
         if (layout == null || index < 0 || index >= tops.length) return;
         scroller.forceFinished(true);
-        sy = (tops[index] - gap) * zoom;
+        sy = (tops[index] - gap) * zoom - topInset;
         clampScroll();
         invalidate();
     }
@@ -291,7 +311,9 @@ public final class DocPageView extends View {
         viewW = w;
         viewH = h;
         layoutPages();
-        if (contentH > 0) sy = anchor * contentH * zoom - h / 2f;
+        // Rotation keeps the middle in view; a toolbar hiding or showing (same width) keeps the
+        // scroll, so the page moves with the toolbar instead of jumping.
+        if (contentH > 0 && w != oldw) sy = anchor * contentH * zoom - h / 2f;
         clampScroll();
     }
 
@@ -323,7 +345,8 @@ public final class DocPageView extends View {
 
     private void clampScroll() {
         sx = Math.max(0, Math.min(sx, maxScrollX()));
-        sy = Math.max(0, Math.min(sy, maxScrollY()));
+        // Up to topInset above the first page: room for the floating toolbar.
+        sy = Math.max(-topInset, Math.min(sy, maxScrollY()));
     }
 
     private int pageAt(float y) {
@@ -477,6 +500,7 @@ public final class DocPageView extends View {
         final PageLayout l = layout;
         final int generation = tileGeneration;
         final float imageScale = fit;
+        final int arrivals = imageArrivals;
         renderer.execute(() -> {
             // Zoom changed or the page scrolled well away meanwhile: not worth drawing.
             if (generation != tileGeneration || index < visibleFirst - 1 || index > visibleLast + 1) {
@@ -519,6 +543,11 @@ public final class DocPageView extends View {
             Tasks.main(() -> {
                 if (generation != tileGeneration || layout != l) return;
                 tileRequests.remove(key);
+                if (missingImage[0] && arrivals != imageArrivals) {
+                    // A picture arrived while drawing: draw the tile again with it.
+                    invalidate();
+                    return;
+                }
                 tiles.put(key, bmp);
                 // Drawn without a picture that is still loading: redrawn when it arrives.
                 if (missingImage[0]) tilesWaitForImages = true;
@@ -536,6 +565,7 @@ public final class DocPageView extends View {
         final int h = Math.max(1, Math.round(page.height * scale));
         final int generation = renderGeneration;
         final PageLayout l = layout;
+        final int arrivals = imageArrivals;
         rendering.add(index);
         renderer.execute(() -> {
             Bitmap bmp;
@@ -571,6 +601,11 @@ public final class DocPageView extends View {
             Tasks.main(() -> {
                 if (generation != renderGeneration || layout != l) return;
                 rendering.remove(index);
+                if (missingImage[0] && arrivals != imageArrivals) {
+                    // A picture arrived while drawing: draw the page again with it.
+                    invalidate();
+                    return;
+                }
                 pageBitmaps.put(index, bmp);
                 if (missingImage[0]) waitingForImages.add(index);
                 invalidate();
@@ -974,6 +1009,7 @@ public final class DocPageView extends View {
                 }
                 if (bmp == null || layout == null) return;
                 images.put(key, bmp);
+                imageArrivals++;
                 // Cached pages drawn without this picture are redrawn.
                 for (Integer page : waitingForImages) pageBitmaps.remove(page);
                 waitingForImages.clear();
@@ -997,7 +1033,7 @@ public final class DocPageView extends View {
 
     private float thumbTop() {
         float max = maxScrollY();
-        return max <= 0 ? 0 : (viewH - thumbHeight()) * sy / max;
+        return max <= 0 ? 0 : (viewH - thumbHeight()) * Math.max(0, sy) / max;
     }
 
     private void drawThumb(Canvas canvas) {

@@ -37,7 +37,7 @@ public final class CellPanel extends LinearLayout {
         super(context);
         density = getResources().getDisplayMetrics().density;
         setOrientation(VERTICAL);
-        setBackgroundColor(Color.WHITE);
+        setBackgroundColor(context.getColor(R.color.surface));
         setElevation(8 * density);
         setVisibility(GONE);
 
@@ -49,10 +49,10 @@ public final class CellPanel extends LinearLayout {
 
         ref = new TextView(context);
         ref.setTypeface(Typeface.DEFAULT_BOLD);
-        ref.setTextColor(0xFF1A73E8);
+        ref.setTextColor(context.getColor(R.color.accent));
         ref.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
         GradientDrawable chip = new GradientDrawable();
-        chip.setColor(0xFFE8F0FE);
+        chip.setColor(context.getColor(R.color.accent_soft));
         chip.setCornerRadius(6 * density);
         ref.setBackground(chip);
         ref.setPadding(dp(8), dp(3), dp(8), dp(3));
@@ -61,14 +61,14 @@ public final class CellPanel extends LinearLayout {
         line = new TextView(context);
         line.setSingleLine(true);
         line.setEllipsize(TextUtils.TruncateAt.END);
-        line.setTextColor(0xFF202124);
+        line.setTextColor(context.getColor(R.color.text_primary));
         line.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
         line.setPadding(dp(10), 0, dp(6), 0);
         header.addView(line, new LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         copy = new TextView(context);
         copy.setText(android.R.string.copy);
-        copy.setTextColor(0xFF1A73E8);
+        copy.setTextColor(context.getColor(R.color.accent));
         copy.setTypeface(Typeface.DEFAULT_BOLD);
         copy.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
         copy.setPadding(dp(10), dp(6), dp(10), dp(6));
@@ -77,7 +77,7 @@ public final class CellPanel extends LinearLayout {
         header.addView(copy);
 
         arrow = new TextView(context);
-        arrow.setTextColor(0xFF5F6368);
+        arrow.setTextColor(context.getColor(R.color.text_secondary));
         arrow.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
         arrow.setPadding(dp(8), 0, dp(4), 0);
         header.addView(arrow);
@@ -85,7 +85,7 @@ public final class CellPanel extends LinearLayout {
 
         full = new TextView(context);
         full.setTextIsSelectable(true);
-        full.setTextColor(0xFF202124);
+        full.setTextColor(context.getColor(R.color.text_primary));
         full.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
         full.setLineSpacing(0, 1.15f);
         full.setPadding(dp(16), 0, dp(16), dp(14));

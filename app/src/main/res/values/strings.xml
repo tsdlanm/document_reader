@@ -28,6 +28,9 @@
     <string name="sheet_truncated">The sheet is very large; only the first part is shown.</string>
     <string name="copied">Copied</string>
     <string name="chart">Chart</string>
+    <string name="filter_blank">(Blanks)</string>
+    <string name="filter_clear">Show all</string>
+    <string name="credit">Made by tsdlanm · github.com/tsdlanm</string>
     <string name="reading_mode">Reading mode</string>
     <string name="page_mode">Page layout</string>
 </resources>

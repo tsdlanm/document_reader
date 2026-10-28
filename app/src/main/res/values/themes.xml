@@ -1,11 +1,34 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Framework Material theme: no AppCompat library needed. -->
-    <style name="BaseTheme" parent="android:Theme.Material.Light.DarkActionBar">
-        <item name="android:colorPrimary">#1565C0</item>
-        <item name="android:colorPrimaryDark">#0D47A1</item>
-        <item name="android:colorAccent">#1E88E5</item>
+    <!-- Framework Material theme: no AppCompat library needed. Warm light chrome; the dark one is in values-night. -->
+    <style name="BaseTheme" parent="android:Theme.Material.Light">
+        <item name="android:colorPrimary">@color/bar</item>
+        <item name="android:colorPrimaryDark">@color/bar</item>
+        <item name="android:colorAccent">@color/accent</item>
+        <item name="android:colorControlNormal">@color/bar_text</item>
         <item name="android:windowBackground">@color/window_background</item>
+        <item name="android:statusBarColor">@color/bar</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:navigationBarColor">@color/nav_bar</item>
+        <item name="android:actionBarStyle">@style/Bar</item>
+        <item name="android:actionMenuTextColor">@color/bar_text</item>
+        <item name="android:textColorPrimary">@color/text_primary</item>
+        <item name="android:textColorSecondary">@color/text_secondary</item>
+    </style>
+
+    <style name="Bar" parent="android:Widget.Material.Light.ActionBar.Solid">
+        <item name="android:background">@color/bar</item>
+        <item name="android:elevation">2dp</item>
+        <item name="android:titleTextStyle">@style/BarTitle</item>
+        <item name="android:subtitleTextStyle">@style/BarSubtitle</item>
+    </style>
+
+    <style name="BarTitle" parent="android:TextAppearance.Material.Widget.ActionBar.Title">
+        <item name="android:textColor">@color/bar_text</item>
+    </style>
+
+    <style name="BarSubtitle" parent="android:TextAppearance.Material.Widget.ActionBar.Subtitle">
+        <item name="android:textColor">@color/text_secondary</item>
     </style>
 
     <style name="AppTheme" parent="BaseTheme" />

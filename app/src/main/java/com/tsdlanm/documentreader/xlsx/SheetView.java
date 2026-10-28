@@ -47,9 +47,11 @@ public final class SheetView extends View {
     /** Excel sizes are in 96-dpi pixels / points; this scales them to dp, as large as Mi Doc Viewer shows them. */
     private static final float SIZE_FACTOR = 0.88f;
     private static final float MIN_ZOOM = 0.35f, MAX_ZOOM = 4f;
-    private static final int GRID = 0xFFDCDCDC, HEADER_BG = 0xFFF1F3F4, HEADER_LINE = 0xFFBDBDBD;
-    private static final int HEADER_TEXT = 0xFF5F6368, SELECT = 0xFF1A73E8, SELECT_FILL = 0x221A73E8;
-    private static final int HEADER_SELECTED = 0xFFD2E3FC, FREEZE_LINE = 0xFF9E9E9E, PLACEHOLDER = 0xFFEEEEEE;
+    private static final int GRID = 0xFFDCDCDC, SELECT = 0xFF1A73E8, SELECT_FILL = 0x221A73E8;
+    /** Row and column headers follow the app's light or dark colours; the cells stay paper. */
+    private final int HEADER_BG, HEADER_LINE, HEADER_TEXT, HEADER_SELECTED;
+    private static final int FILTER_BG = 0xFFF8F9FA, FILTER_ACTIVE_BG = 0xFFE8F0FE;
+    private static final int FREEZE_LINE = 0xFF9E9E9E, PLACEHOLDER = 0xFFEEEEEE;
     private static final float EMU_PER_PX = 9525f;
     private static final long MAX_COLS_KEY = 16384;
     /** How many columns text spilling left is followed across (also how far right the pane looks for it). */
@@ -104,6 +106,10 @@ public final class SheetView extends View {
     public SheetView(Context context) {
         super(context);
         density = getResources().getDisplayMetrics().density;
+        HEADER_BG = context.getColor(R.color.header_bg);
+        HEADER_LINE = context.getColor(R.color.header_line);
+        HEADER_TEXT = context.getColor(R.color.header_text);
+        HEADER_SELECTED = context.getColor(R.color.header_selected);
         setBackgroundColor(Color.WHITE);
         // One screen pixel, like Excel's gridlines: thicker ones crowd out the text.
         line.setStrokeWidth(1f);
@@ -111,6 +117,13 @@ public final class SheetView extends View {
         cover.setStrokeWidth(2f);
         dotted = new DashPathEffect(new float[]{density, density * 1.5f}, 0);
         dashed = new DashPathEffect(new float[]{density * 3, density * 2}, 0);
+        int tilesKb = MemoryBudget.kb(context, 12 * 1024, 8, 2.5f, 2);
+        tiles = new LruCache<Long, Bitmap>(tilesKb) {
+            @Override
+            protected int sizeOf(Long key, Bitmap value) {
+                return Math.max(1, value.getByteCount() / 1024);
+            }
+        };
         int imagesKb = MemoryBudget.kb(context, 16 * 1024, 8, 0, 2);
         images = new LruCache<String, Bitmap>(imagesKb) {
             @Override
@@ -189,6 +202,8 @@ public final class SheetView extends View {
             @Override
             public void onScaleEnd(ScaleGestureDetector d) {
                 scaling = false;
+                // Draw the tiles at the new zoom.
+                invalidate();
             }
         });
     }
@@ -202,6 +217,7 @@ public final class SheetView extends View {
         widthScales.clear();
         widthScaleCount = 0;
         wrapped.evictAll();
+        dropTiles();
         invalidate();
     };
 
@@ -225,6 +241,7 @@ public final class SheetView extends View {
     public void setData(SheetData d) {
         data = d;
         wrapped.evictAll();
+        dropTiles();
         widthScales.clear();
         widthScaleCount = 0;
         images.evictAll();
@@ -279,7 +296,7 @@ public final class SheetView extends View {
     }
 
     private float maxY() {
-        return Math.max(0, rowY[rowY.length - 1] * zoom - (getHeight() - headerH * zoom));
+        return Math.max(0, rowY[rowY.length - 1] * zoom - (getHeight() - topInset - headerH * zoom));
     }
 
     private void clamp() {
@@ -341,6 +358,7 @@ public final class SheetView extends View {
     }
 
     private void selectAt(float x, float y) {
+        y -= topInset;
         if (data == null || data.isEmpty()) return;
         float vx = x - headerW * zoom, vy = y - headerH * zoom;
         if (vx < 0 || vy < 0) return;
@@ -349,6 +367,12 @@ public final class SheetView extends View {
         float cy = vy < rowY[frozenRows] * zoom ? vy / zoom : (vy + sy) / zoom;
         if (cx >= colX[colX.length - 1] || cy >= rowY[rowY.length - 1]) return;
         int c = find(colX, cx), r = find(rowY, cy);
+        int[] f = data.filterRange;
+        if (f != null && filterListener != null && r == f[0] && c >= f[1] && c <= f[3]
+                && cx >= colX[c + 1] - filterButtonSize(r) - 6 * density) {
+            filterListener.onFilter(c);
+            return;
+        }
         int[] m = mergeAt(r, c);
         if (m != null) {
             r = m[0];
@@ -365,11 +389,13 @@ public final class SheetView extends View {
         if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
             images.evictAll();
             wrapped.evictAll();
+        dropTiles();
             widthScales.clear();
             widthScaleCount = 0;
             invalidate();
         }
     }
+
 
     public void clearSelection() {
         selRow = selCol = -1;
@@ -402,8 +428,30 @@ public final class SheetView extends View {
 
     // -------------------------------------------------------------- drawing
 
+    /**
+     * Room above the sheet for the toolbar, which floats over the view (pixels). A sheet keeps
+     * its toolbar, so the whole sheet, column letters included, is drawn below it.
+     */
+    private int topInset;
+
+    public void setTopInset(int px) {
+        topInset = px;
+        invalidate();
+    }
+
     @Override
     protected void onDraw(Canvas canvas) {
+        if (topInset <= 0) {
+            drawSheet(canvas);
+            return;
+        }
+        canvas.save();
+        canvas.translate(0, topInset);
+        drawSheet(canvas);
+        canvas.restore();
+    }
+
+    private void drawSheet(Canvas canvas) {
         if (data == null || data.isEmpty()) return;
         int w = getWidth(), h = getHeight();
         float hx = headerW * zoom, hy = headerH * zoom;
@@ -411,10 +459,22 @@ public final class SheetView extends View {
         int lastRow = rowY.length - 2, lastCol = colX.length - 2;
 
         // The scrolling part first, then the frozen panes over it.
-        drawPane(canvas, sx, sy, fx, fy, w, h, frozenRows, lastRow, frozenCols, lastCol);
-        if (frozenCols > 0) drawPane(canvas, 0, sy, hx, fy, fx, h, frozenRows, lastRow, 0, frozenCols - 1);
-        if (frozenRows > 0) drawPane(canvas, sx, 0, fx, hy, w, fy, 0, frozenRows - 1, frozenCols, lastCol);
-        if (frozenRows > 0 && frozenCols > 0) drawPane(canvas, 0, 0, hx, hy, fx, fy, 0, frozenRows - 1, 0, frozenCols - 1);
+        if (scaling) {
+            // Pinching: the zoom changes every frame, so the cells are drawn directly.
+            drawPane(canvas, sx, sy, fx, fy, w, h, frozenRows, lastRow, frozenCols, lastCol);
+            if (frozenCols > 0) drawPane(canvas, 0, sy, hx, fy, fx, h, frozenRows, lastRow, 0, frozenCols - 1);
+            if (frozenRows > 0) drawPane(canvas, sx, 0, fx, hy, w, fy, 0, frozenRows - 1, frozenCols, lastCol);
+            if (frozenRows > 0 && frozenCols > 0) drawPane(canvas, 0, 0, hx, hy, fx, fy, 0, frozenRows - 1, 0, frozenCols - 1);
+        } else {
+            if (zoom != tileZoom) {
+                tiles.evictAll();
+                tileZoom = zoom;
+            }
+            blitPane(canvas, sx, sy, fx, fy, w, h);
+            if (frozenCols > 0) blitPane(canvas, 0, sy, hx, fy, fx, h);
+            if (frozenRows > 0) blitPane(canvas, sx, 0, fx, hy, w, fy);
+            if (frozenRows > 0 && frozenCols > 0) blitPane(canvas, 0, 0, hx, hy, fx, fy);
+        }
 
         drawPictures(canvas, w, h);
         drawSelection(canvas, w, h);
@@ -423,6 +483,68 @@ public final class SheetView extends View {
         if (frozenCols > 0) canvas.drawLine(fx, hy, fx, h, line);
         if (frozenRows > 0) canvas.drawLine(hx, fy, w, fy, line);
         drawHeaders(canvas, w, h, hx, hy, fx, fy);
+    }
+
+    // ---------------------------------------------------------------- tiles
+
+    /**
+     * The cells are drawn once into tiles at the current zoom; scrolling then only moves bitmaps,
+     * as in the Word page view, instead of drawing every visible cell each frame. Selection,
+     * pictures and headers are drawn over them directly. Tiles cover the sheet in zoomed pixels
+     * from cell A1, so the frozen panes reuse the same tiles.
+     */
+    private static final int TILE = 512;
+    private final LruCache<Long, Bitmap> tiles;
+    private float tileZoom = -1;
+    private final Canvas tileCanvas = new Canvas();
+
+    /** Cell contents or sizes changed: the tiles are drawn again. */
+    private void dropTiles() {
+        tiles.evictAll();
+    }
+
+    /** Draws a pane from tiles: content scrolled by psx/psy into the screen box. */
+    private void blitPane(Canvas canvas, float psx, float psy, float left, float top, float right, float bottom) {
+        if (right <= left || bottom <= top) return;
+        float hx = headerW * zoom, hy = headerH * zoom;
+        float cx0 = left - hx + psx, cx1 = right - hx + psx;
+        float cy0 = top - hy + psy, cy1 = bottom - hy + psy;
+        int tx0 = Math.max(0, (int) Math.floor(cx0 / TILE)), tx1 = (int) Math.floor((cx1 - 1) / TILE);
+        int ty0 = Math.max(0, (int) Math.floor(cy0 / TILE)), ty1 = (int) Math.floor((cy1 - 1) / TILE);
+        float ox = Math.round(hx - psx), oy = Math.round(hy - psy);
+        canvas.save();
+        canvas.clipRect(left, top, right, bottom);
+        for (int ty = ty0; ty <= ty1; ty++) {
+            for (int tx = tx0; tx <= tx1; tx++) {
+                Bitmap b = tile(tx, ty);
+                if (b != null) canvas.drawBitmap(b, ox + tx * TILE, oy + ty * TILE, null);
+            }
+        }
+        canvas.restore();
+    }
+
+    /** The tile at (tx, ty), drawn now if not cached; null past the sheet's edge or out of memory. */
+    private Bitmap tile(int tx, int ty) {
+        if (tx * (float) TILE >= colX[colX.length - 1] * zoom || ty * (float) TILE >= rowY[rowY.length - 1] * zoom) {
+            return null;
+        }
+        long key = ((long) tx << 32) | (ty & 0xFFFFFFFFL);
+        Bitmap b = tiles.get(key);
+        if (b != null) return b;
+        try {
+            b = Bitmap.createBitmap(TILE, TILE, Bitmap.Config.RGB_565);
+        } catch (OutOfMemoryError e) {
+            tiles.evictAll();
+            return null;
+        }
+        b.eraseColor(Color.WHITE);
+        tileCanvas.setBitmap(b);
+        float hx = headerW * zoom, hy = headerH * zoom;
+        drawPane(tileCanvas, hx + tx * TILE, hy + ty * TILE, 0, 0, TILE, TILE,
+                0, rowY.length - 2, 0, colX.length - 2);
+        tileCanvas.setBitmap(null);
+        tiles.put(key, b);
+        return b;
     }
 
     /**
@@ -517,7 +639,70 @@ public final class SheetView extends View {
         for (int[] m : visibleMerges) {
             if (m[2] >= minRow && m[3] >= minCol) drawCellText(canvas, m[0], m[1], c1, textPx, pad, true);
         }
+        drawFilterButtons(canvas, r0, r1, c0, c1);
         canvas.restore();
+    }
+
+    // ------------------------------------------------------------- filters
+
+    public interface OnFilterListener {
+        /** The filter button of a column was tapped. */
+        void onFilter(int col);
+    }
+
+    private OnFilterListener filterListener;
+    private final android.graphics.Path arrow = new android.graphics.Path();
+
+    public void setOnFilterListener(OnFilterListener l) {
+        filterListener = l;
+    }
+
+    /** Size of a filter button at zoom 1, fitted to its header row. */
+    private float filterButtonSize(int r) {
+        return Math.max(4f, Math.min(16 * density, rowY[r + 1] - rowY[r] - 2));
+    }
+
+    /** The AutoFilter's drop-down buttons in its header row, bottom right of each cell. */
+    private void drawFilterButtons(Canvas canvas, int r0, int r1, int c0, int c1) {
+        int[] f = data.filterRange;
+        if (f == null || f[0] < r0 || f[0] > r1) return;
+        int r = f[0];
+        float s = filterButtonSize(r) * zoom;
+        float bottom = cellTop(r + 1) - zoom;
+        for (int c = Math.max(c0, f[1]); c <= Math.min(c1, f[3]); c++) {
+            float right = cellLeft(c + 1) - zoom;
+            rect.set(right - s, bottom - s, right, bottom);
+            boolean active = data.filters.containsKey(c);
+            fill.setColor(active ? FILTER_ACTIVE_BG : FILTER_BG);
+            canvas.drawRect(rect, fill);
+            line.setColor(active ? SELECT : HEADER_LINE);
+            canvas.drawLine(rect.left, rect.top, rect.right, rect.top, line);
+            canvas.drawLine(rect.left, rect.bottom, rect.right, rect.bottom, line);
+            canvas.drawLine(rect.left, rect.top, rect.left, rect.bottom, line);
+            canvas.drawLine(rect.right, rect.top, rect.right, rect.bottom, line);
+            float cx = rect.centerX(), cy = rect.centerY(), w = s * 0.25f;
+            arrow.rewind();
+            arrow.moveTo(cx - w, cy - w * 0.5f);
+            arrow.lineTo(cx + w, cy - w * 0.5f);
+            arrow.lineTo(cx, cy + w * 0.6f);
+            arrow.close();
+            fill.setColor(active ? SELECT : HEADER_TEXT);
+            canvas.drawPath(arrow, fill);
+        }
+    }
+
+    /** Row heights changed (a filter): lay the rows out again. */
+    public void rowsChanged() {
+        if (data == null) return;
+        dropTiles();
+        float px = SIZE_FACTOR * density;
+        int rows = data.rowCount;
+        float extra = rowY.length > rows + 1 ? rowY[rows + 1] - rowY[rows] : 0;
+        for (int r = 0; r < rows; r++) rowY[r + 1] = rowY[r] + data.rowHeights[r] * 1.333f * px;
+        for (int r = rows; r < rowY.length - 1; r++) rowY[r + 1] = rowY[r] + extra;
+        selRow = selCol = -1;
+        clamp();
+        invalidate();
     }
 
     private void buildMergeGrid(int r0, int r1, int c0, int c1) {

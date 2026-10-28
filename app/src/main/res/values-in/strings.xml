@@ -28,6 +28,9 @@
     <string name="sheet_truncated">Lembar ini sangat besar; hanya bagian awal yang ditampilkan.</string>
     <string name="copied">Disalin</string>
     <string name="chart">Grafik</string>
+    <string name="filter_blank">(Kosong)</string>
+    <string name="filter_clear">Tampilkan semua</string>
+    <string name="credit">Dibuat oleh tsdlanm · github.com/tsdlanm</string>
     <string name="reading_mode">Mode baca</string>
     <string name="page_mode">Tampilan halaman</string>
 </resources>

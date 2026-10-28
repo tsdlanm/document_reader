@@ -19,9 +19,11 @@ import android.os.ParcelFileDescriptor;
 import android.text.InputType;
 import android.text.TextUtils;
 import android.util.TypedValue;
+import android.view.GestureDetector;
 import android.view.Gravity;
 import android.view.Menu;
 import android.view.MenuItem;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.EditText;
@@ -90,6 +92,7 @@ public final class ViewerActivity extends Activity {
     private DocxAdapter docAdapter;
     private SheetView sheetView;
     private CellPanel cellPanel;
+    private SheetData sheetData;
     private TextView sheetMessage;
     private LinearLayout tabs;
     private int currentSheet;
@@ -97,6 +100,8 @@ public final class ViewerActivity extends Activity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        // The toolbar floats over the document, so hiding or showing it never moves the page.
+        getWindow().requestFeature(android.view.Window.FEATURE_ACTION_BAR_OVERLAY);
         super.onCreate(savedInstanceState);
         // Office-compatible fonts; usually already cached, so ready before the layout needs them.
         FontMatch.prefetch(this);
@@ -109,13 +114,13 @@ public final class ViewerActivity extends Activity {
         if (bar != null) bar.setDisplayHomeAsUpEnabled(true);
 
         root = new FrameLayout(this);
-        root.setBackgroundColor(0xFFEEEEEE);
+        root.setBackgroundColor(getColor(R.color.page_background));
         progress = new ProgressBar(this);
         root.addView(progress, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER));
         message = new TextView(this);
         message.setGravity(Gravity.CENTER);
-        message.setTextColor(0xFF616161);
+        message.setTextColor(getColor(R.color.text_secondary));
         message.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
         int pad = dp(32);
         message.setPadding(pad, pad, pad, pad);
@@ -353,6 +358,7 @@ public final class ViewerActivity extends Activity {
     private void showPdf(final PdfEngine engine) {
         pdfView = new PdfView(this);
         pdfView.setEngine(engine);
+        pdfView.setTopInset(toolbarHeight());
         pdfView.setOnPageChangeListener(page -> {
             ActionBar bar = getActionBar();
             if (bar != null) bar.setSubtitle(getString(R.string.page_of, page + 1, engine.pageCount));
@@ -409,6 +415,7 @@ public final class ViewerActivity extends Activity {
     private void showDocPages() {
         docPages = new DocPageView(this);
         docPages.setDocument(loaded.pages, loaded.zip);
+        docPages.setTopInset(toolbarHeight());
         docPages.addPages(laidOut);
         docPages.setOnPageChangeListener(page -> updatePageSubtitle());
         root.addView(docPages, 0, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
@@ -485,6 +492,9 @@ public final class ViewerActivity extends Activity {
         docList = new ListView(this);
         docList.setBackgroundColor(Color.WHITE);
         docList.setDivider(null);
+        // Room for the floating toolbar above the first lines; they scroll under it.
+        docList.setPadding(0, toolbarHeight(), 0, 0);
+        docList.setClipToPadding(false);
         docList.setSelector(android.R.color.transparent);
         docList.setFastScrollEnabled(true);
         docList.setClipToPadding(false);
@@ -514,17 +524,20 @@ public final class ViewerActivity extends Activity {
     private void showXlsx(Loaded r) {
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
-        box.setBackgroundColor(Color.WHITE);
+        box.setBackgroundColor(getColor(R.color.surface));
 
         FrameLayout sheetArea = new FrameLayout(this);
         sheetView = new SheetView(this);
         sheetView.setZip(loaded.zip);
+        // A sheet keeps its toolbar: the cells are drawn below it.
+        sheetView.setTopInset(toolbarHeight());
+        sheetView.setOnFilterListener(this::showFilter);
         sheetView.setOnCellSelectedListener((row, col, text) ->
                 cellPanel.show(SheetData.columnName(col) + (row + 1), text));
         sheetArea.addView(sheetView);
         sheetMessage = new TextView(this);
         sheetMessage.setGravity(Gravity.CENTER);
-        sheetMessage.setTextColor(0xFF757575);
+        sheetMessage.setTextColor(getColor(R.color.text_secondary));
         sheetMessage.setText(R.string.sheet_empty);
         sheetMessage.setVisibility(View.GONE);
         sheetArea.addView(sheetMessage, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
@@ -538,7 +551,7 @@ public final class ViewerActivity extends Activity {
         if (r.workbook.sheets.size() > 1) {
             HorizontalScrollView scroll = new HorizontalScrollView(this);
             scroll.setHorizontalScrollBarEnabled(false);
-            scroll.setBackgroundColor(0xFFF1F3F4);
+            scroll.setBackgroundColor(getColor(R.color.header_bg));
             tabs = new LinearLayout(this);
             tabs.setOrientation(LinearLayout.HORIZONTAL);
             for (int i = 0; i < r.workbook.sheets.size(); i++) {
@@ -601,6 +614,7 @@ public final class ViewerActivity extends Activity {
 
     private void showSheet(int index, SheetData data) {
         currentSheet = index;
+        sheetData = data;
         if (sheetToken == 0) sheetToken = 1;
         highlightTab();
         sheetView.setData(data);
@@ -610,14 +624,54 @@ public final class ViewerActivity extends Activity {
         if (data.truncated) Toast.makeText(this, R.string.sheet_truncated, Toast.LENGTH_LONG).show();
     }
 
+    /** The AutoFilter choices of a column: tick the values to show. */
+    private void showFilter(int col) {
+        final SheetData data = sheetData;
+        if (data == null || data.filterRange == null) return;
+        final List<String> values = data.filterValues(col);
+        if (values.isEmpty()) return;
+        java.util.Set<String> shown = data.filters.get(col);
+        final boolean[] checked = new boolean[values.size()];
+        String[] labels = new String[values.size()];
+        for (int i = 0; i < values.size(); i++) {
+            String v = values.get(i);
+            labels[i] = v.isEmpty() ? getString(R.string.filter_blank) : v;
+            checked[i] = shown == null || shown.contains(v);
+        }
+        String header = data.text(data.filterRange[0], col);
+        new AlertDialog.Builder(this)
+                .setTitle(header == null || header.isEmpty() ? SheetData.columnName(col) : header)
+                .setMultiChoiceItems(labels, checked, (d, which, isChecked) -> checked[which] = isChecked)
+                .setPositiveButton(android.R.string.ok, (d, which) -> {
+                    java.util.Set<String> keep = new java.util.HashSet<>();
+                    for (int i = 0; i < checked.length; i++) if (checked[i]) keep.add(values.get(i));
+                    if (keep.size() == values.size()) data.filters.remove(col);
+                    else data.filters.put(col, keep);
+                    applyFilter(data);
+                })
+                .setNeutralButton(R.string.filter_clear, (d, which) -> {
+                    data.filters.remove(col);
+                    applyFilter(data);
+                })
+                .setNegativeButton(android.R.string.cancel, null)
+                .show();
+    }
+
+    private void applyFilter(SheetData data) {
+        if (data != sheetData) return;
+        data.applyFilter();
+        sheetView.rowsChanged();
+        cellPanel.hide();
+    }
+
     private void highlightTab() {
         if (tabs == null) return;
         for (int i = 0; i < tabs.getChildCount(); i++) {
             TextView t = (TextView) tabs.getChildAt(i);
             boolean sel = i == currentSheet;
             t.setTypeface(sel ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
-            t.setTextColor(sel ? 0xFF1565C0 : 0xFF5F6368);
-            t.setBackgroundColor(sel ? Color.WHITE : 0x00000000);
+            t.setTextColor(getColor(sel ? R.color.accent : R.color.header_text));
+            t.setBackgroundColor(sel ? getColor(R.color.surface) : 0x00000000);
         }
     }
 
@@ -669,6 +723,70 @@ public final class ViewerActivity extends Activity {
         if (docList != null && docAdapter != null) bindDocAdapter(docAdapter.getTextScale());
     }
 
+    // ----------------------------------------------------------- toolbar
+
+    /**
+     * Any scroll hides the toolbar; a tap brings it back (or hides it). A sheet keeps its
+     * toolbar: there a tap picks a cell.
+     */
+    private GestureDetector barTaps;
+    private final android.graphics.Rect hit = new android.graphics.Rect();
+    private float downX, downY;
+    private boolean barGestureDone;
+
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent ev) {
+        View doc = documentView();
+        ActionBar bar = getActionBar();
+        if (doc != null && bar != null && sheetView == null) {
+            if (ev.getActionMasked() == MotionEvent.ACTION_DOWN) {
+                doc.getGlobalVisibleRect(hit);
+                barGestureDone = !hit.contains((int) ev.getRawX(), (int) ev.getRawY());
+                downX = ev.getX();
+                downY = ev.getY();
+            }
+            if (ev.getPointerCount() > 1) barGestureDone = true;
+            if (!barGestureDone) {
+                if (barTaps == null) {
+                    barTaps = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
+                        @Override
+                        public boolean onSingleTapConfirmed(MotionEvent e) {
+                            ActionBar b = getActionBar();
+                            if (b == null) return false;
+                            if (b.isShowing()) b.hide();
+                            else b.show();
+                            return false;
+                        }
+                    });
+                }
+                barTaps.onTouchEvent(ev);
+                float moved = (float) Math.hypot(ev.getX() - downX, ev.getY() - downY);
+                if (ev.getActionMasked() == MotionEvent.ACTION_MOVE && moved > dp(24)) {
+                    bar.hide();
+                    barGestureDone = true;
+                }
+            }
+        }
+        return super.dispatchTouchEvent(ev);
+    }
+
+    /** Height of the toolbar floating over the document (its room above the first page). */
+    private int toolbarHeight() {
+        TypedValue tv = new TypedValue();
+        if (getTheme().resolveAttribute(android.R.attr.actionBarSize, tv, true)) {
+            return TypedValue.complexToDimensionPixelSize(tv.data, getResources().getDisplayMetrics());
+        }
+        return dp(56);
+    }
+
+    /** The page or text view showing the document, or null (loading, message, or a sheet). */
+    private View documentView() {
+        if (pdfView != null) return pdfView;
+        if (docPages != null) return docPages;
+        if (docList != null && docList.getParent() != null) return docList;
+        return null;
+    }
+
     /** Back first closes the cell panel step by step, then leaves. */
     @Override
     @SuppressWarnings("deprecation")
@@ -679,7 +797,9 @@ public final class ViewerActivity extends Activity {
             cellPanel.hide();
             sheetView.clearSelection();
         } else {
-            super.onBackPressed();
+            // Leaves the app instead of going back to its home screen. Opened from another app,
+            // only this viewer closes and that app shows again.
+            finishAffinity();
         }
     }
 

@@ -1799,6 +1799,12 @@ public final class PageLayout {
             float[] s = drawingSize(dr, sec.width, sec.height);
             if (s == null) return;
             float[] at = floatingPosition(dr, s[0], s[1], left(), width(), y, sec);
+            // A picture placed below its paragraph that would run past the bottom margin goes to
+            // the next page with that paragraph, as Word moves the anchor rather than cut it.
+            if (dr.vRel == DocModel.REL_PARAGRAPH && at[1] + s[1] > bottom() && !atTop()) {
+                overflow();
+                at = floatingPosition(dr, s[0], s[1], left(), width(), y, sec);
+            }
             l.emitFloating(dr, at[0], at[1], s[0], s[1], page.items);
         }
 

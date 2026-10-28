@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark: warm blacks, never pure black or white. -->
+    <color name="bar">#FF24211E</color>
+    <color name="bar_text">#FFEAE5DE</color>
+    <color name="window_background">#FF1B1917</color>
+    <color name="nav_bar">#FF1B1917</color>
+    <color name="page_background">#FF151311</color>
+    <color name="surface">#FF2A2724</color>
+    <color name="text_primary">#FFEAE5DE</color>
+    <color name="text_secondary">#FFA9A29A</color>
+    <color name="divider">#FF3A3632</color>
+    <color name="accent">#FF8AB4F8</color>
+    <color name="on_accent">#FF1B1917</color>
+    <color name="accent_soft">#FF2C3A4E</color>
+    <color name="header_bg">#FF2F2C28</color>
+    <color name="header_line">#FF48443F</color>
+    <color name="header_text">#FFB3ACA4</color>
+    <color name="header_selected">#FF34445C</color>
+</resources>

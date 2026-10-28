@@ -54,6 +54,8 @@ public class DocxLayoutPropsTest {
                     + "<w:pPr><w:spacing w:after=\"0\" w:line=\"240\" w:lineRule=\"auto\"/></w:pPr>"
                     + "<w:tblPr><w:tblBorders><w:top w:val=\"single\" w:sz=\"4\" w:color=\"auto\"/>"
                     + "<w:insideH w:val=\"single\" w:sz=\"8\" w:color=\"FF0000\"/></w:tblBorders></w:tblPr></w:style>"
+                    + "<w:style w:type=\"character\" w:styleId=\"Hyperlink\"><w:name w:val=\"Hyperlink\"/>"
+                    + "<w:rPr><w:color w:val=\"0563C1\"/><w:u w:val=\"single\"/></w:rPr></w:style>"
                     + "</w:styles>");
             put(z, "word/header1.xml", "<w:hdr " + W + "><w:p><w:r><w:t xml:space=\"preserve\">Hal </w:t></w:r>"
                     + "<w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText> PAGE </w:instrText></w:r>"
@@ -73,6 +75,8 @@ public class DocxLayoutPropsTest {
                     + "<w:tr><w:trPr><w:trHeight w:val=\"500\" w:hRule=\"exact\"/></w:trPr>"
                     + "<w:tc><w:tcPr><w:tcBorders><w:left w:val=\"double\" w:sz=\"12\" w:color=\"00FF00\"/></w:tcBorders>"
                     + "<w:vAlign w:val=\"center\"/></w:tcPr><w:p><w:r><w:t>Sel</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"
+                    + "<w:p><w:hyperlink w:anchor=\"_Toc1\"><w:r><w:rPr><w:rStyle w:val=\"Hyperlink\"/></w:rPr><w:t>Bab 1</w:t></w:r></w:hyperlink>"
+                    + "<w:hyperlink r:id=\"rWeb\"><w:r><w:rPr><w:rStyle w:val=\"Hyperlink\"/></w:rPr><w:t>situs</w:t></w:r></w:hyperlink></w:p>"
                     + "<w:sectPr><w:pgSz w:w=\"12240\" w:h=\"20160\"/><w:pgMar w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\" w:left=\"1440\"/></w:sectPr>"
                     + "</w:body></w:document>");
         }
@@ -85,6 +89,22 @@ public class DocxLayoutPropsTest {
         z.putNextEntry(new ZipEntry(name));
         z.write(xml.getBytes(StandardCharsets.UTF_8));
         z.closeEntry();
+    }
+
+    @Test
+    public void internalLinksReadAsPlainText() throws Exception {
+        DocModel.Document doc = parse();
+        Paragraph links = null;
+        for (DocModel.Block b : doc.blocks) {
+            if (b instanceof Paragraph && ((Paragraph) b).plainText().startsWith("Bab 1")) links = (Paragraph) b;
+        }
+        assertNotNull(links);
+        // A table-of-contents link: no link colour or underline.
+        assertEquals(0, links.runs.get(0).color);
+        assertFalse(links.runs.get(0).underline);
+        // A web link keeps them.
+        assertEquals(0xFF0563C1, links.runs.get(1).color);
+        assertTrue(links.runs.get(1).underline);
     }
 
     @Test

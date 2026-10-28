@@ -142,6 +142,8 @@ public final class DocxParser {
     /** Word's size when neither the defaults nor the Normal style give one: 10 pt (not 11). */
     private int defaultHalfPoints = 20;
     private int defaultTab = 720;
+    /** Depth of internal links (w:hyperlink w:anchor) being read. */
+    private int internalLinks;
     private String defaultParagraphStyle;
     /** Style of the table whose cells are being read, or null. */
     private String tableStyle;
@@ -1062,6 +1064,19 @@ public final class DocxParser {
                 // Paragraph nested in inline content (rare): parse it as its own block.
                 parseParagraph(p, ctx.deferred);
                 return;
+            case "hyperlink": {
+                // A link within the document (table of contents, cross-reference) reads as plain
+                // text, as Word prints it; links to web pages keep their link look.
+                boolean internal = XmlUtil.attr(p, "anchor") != null && XmlUtil.attr(p, "id") == null;
+                if (internal) internalLinks++;
+                try {
+                    int d = p.getDepth();
+                    while (XmlUtil.nextChild(p, d)) parseInline(p, ctx);
+                } finally {
+                    if (internal) internalLinks--;
+                }
+                return;
+            }
             default:
                 int d = p.getDepth();
                 while (XmlUtil.nextChild(p, d)) parseInline(p, ctx);
@@ -1091,7 +1106,8 @@ public final class DocxParser {
             }
         }
         RunProps eff = base.copy();
-        if (charStyle != null) eff.apply(resolveRun(charStyle, 0));
+        boolean linkStyle = charStyle != null && charStyle.toLowerCase(java.util.Locale.ROOT).contains("hyperlink");
+        if (charStyle != null && !(linkStyle && internalLinks > 0)) eff.apply(resolveRun(charStyle, 0));
         eff.apply(direct);
         return eff;
     }

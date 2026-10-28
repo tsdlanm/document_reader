@@ -1,13 +1,18 @@
 package com.tsdlanm.documentreader;
 
 import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.net.Uri;
 
 import java.util.ArrayList;
 import java.util.List;
 
-/** Small most-recently-opened list kept in SharedPreferences. */
+/**
+ * Small most-recently-opened list kept in SharedPreferences: at most {@link #MAX} entries of a
+ * name and a link (a few KB). The files themselves are not copied. A file leaving the list also
+ * gives back its read permission, so permissions do not pile up either.
+ */
 final class RecentFiles {
     private static final String PREFS = "recent";
     private static final String KEY = "items";
@@ -48,6 +53,7 @@ final class RecentFiles {
     }
 
     private static void save(Context ctx, List<Item> items) {
+        for (int i = MAX; i < items.size(); i++) release(ctx, items.get(i).uri);
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < items.size() && i < MAX; i++) {
             Item it = items.get(i);
@@ -71,10 +77,22 @@ final class RecentFiles {
     static void remove(Context ctx, Uri uri) {
         List<Item> items = load(ctx);
         if (remove(items, uri)) save(ctx, items);
+        release(ctx, uri);
     }
 
     static void clear(Context ctx) {
+        for (Item it : load(ctx)) release(ctx, it.uri);
         prefs(ctx).edit().remove(KEY).apply();
+    }
+
+    /** Gives back the lasting read permission taken when the file was opened. */
+    private static void release(Context ctx, Uri uri) {
+        if (!"content".equals(uri.getScheme())) return;
+        try {
+            ctx.getContentResolver().releasePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        } catch (SecurityException ignored) {
+            // Never held, or already gone.
+        }
     }
 
     private static boolean remove(List<Item> items, Uri uri) {

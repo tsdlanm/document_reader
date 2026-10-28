@@ -29,7 +29,8 @@ public final class PdfView extends View {
     }
 
     private static final float MAX_ZOOM = 5f;
-    private static final int BACKGROUND = 0xFFDDDDDD;
+    /** Around the pages: the app's light or dark background. */
+    private final int BACKGROUND;
     /** Upper bound for one cached page bitmap, in pixels. */
     private static final int MAX_PAGE_PIXELS = 2048 * 2048;
 
@@ -54,6 +55,18 @@ public final class PdfView extends View {
     private float contentH;
     private int viewW, viewH;
     private float zoom = 1f, sx, sy;
+    /**
+     * Space above the first page for the toolbar floating over the view: at the top the page
+     * starts below it; scrolled, the page passes under it. Pixels.
+     */
+    private int topInset;
+
+    public void setTopInset(int px) {
+        boolean atTop = sy <= 0;
+        topInset = px;
+        if (atTop) sy = -px;
+        invalidate();
+    }
     private volatile int wantFirst, wantLast = -1;
 
     private boolean scaling, flinging, draggingThumb;
@@ -73,6 +86,7 @@ public final class PdfView extends View {
     public PdfView(Context context) {
         super(context);
         density = getResources().getDisplayMetrics().density;
+        BACKGROUND = context.getColor(com.tsdlanm.documentreader.R.color.page_background);
         gap = 6 * density;
         white.setColor(Color.WHITE);
         thumbPaint.setColor(0x99666666);
@@ -107,7 +121,7 @@ public final class PdfView extends View {
             public boolean onFling(MotionEvent e1, MotionEvent e2, float vx, float vy) {
                 if (scaling) return false;
                 flinging = true;
-                scroller.fling((int) sx, (int) sy, (int) -vx, (int) -vy, 0, (int) maxScrollX(), 0, (int) maxScrollY());
+                scroller.fling((int) sx, (int) sy, (int) -vx, (int) -vy, 0, (int) maxScrollX(), -topInset, (int) maxScrollY());
                 postInvalidateOnAnimation();
                 return true;
             }
@@ -179,7 +193,7 @@ public final class PdfView extends View {
     public void goToPage(int index) {
         if (engine == null || index < 0 || index >= tops.length) return;
         scroller.forceFinished(true);
-        sy = (tops[index] - gap) * zoom;
+        sy = (tops[index] - gap) * zoom - topInset;
         clampScroll();
         invalidate();
         scheduleDetail();
@@ -225,7 +239,9 @@ public final class PdfView extends View {
         }
         detailValid = false;
         detailFront = detailBack = null;
-        if (contentH > 0) sy = anchor * contentH * zoom - h / 2f;
+        // Rotation keeps the middle in view; a toolbar hiding or showing (same width) keeps the
+        // scroll, so the page moves with the toolbar instead of jumping.
+        if (contentH > 0 && widthChanged) sy = anchor * contentH * zoom - h / 2f;
         clampScroll();
         scheduleDetail();
     }
@@ -260,7 +276,8 @@ public final class PdfView extends View {
 
     private void clampScroll() {
         sx = Math.max(0, Math.min(sx, maxScrollX()));
-        sy = Math.max(0, Math.min(sy, maxScrollY()));
+        // Up to topInset above the first page: room for the floating toolbar.
+        sy = Math.max(-topInset, Math.min(sy, maxScrollY()));
     }
 
     private int pageAt(float y) {
@@ -329,7 +346,7 @@ public final class PdfView extends View {
 
     private float thumbTop() {
         float max = maxScrollY();
-        return max <= 0 ? 0 : (viewH - thumbHeight()) * sy / max;
+        return max <= 0 ? 0 : (viewH - thumbHeight()) * Math.max(0, sy) / max;
     }
 
     private void drawThumb(Canvas canvas) {
