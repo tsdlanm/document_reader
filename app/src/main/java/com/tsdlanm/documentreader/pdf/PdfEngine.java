@@ -45,7 +45,10 @@ public final class PdfEngine {
     }
 
     public final int pageCount;
-    /** Page sizes in points. */
+    /**
+     * Page sizes in points; only read and written on the main thread. Until {@link #measureRest}
+     * has run, every page is assumed to be as large as the first.
+     */
     public final float[] widths, heights;
 
     private final ParcelFileDescriptor pfd;
@@ -60,10 +63,12 @@ public final class PdfEngine {
         pageCount = renderer.getPageCount();
         widths = new float[pageCount];
         heights = new float[pageCount];
-        for (int i = 0; i < pageCount; i++) {
-            PdfRenderer.Page page = renderer.openPage(i);
-            widths[i] = Math.max(1, page.getWidth());
-            heights[i] = Math.max(1, page.getHeight());
+        // Opening a page parses it, which for scanned or image-heavy pages takes long: only the
+        // first is measured before the document shows, the rest by measureRest().
+        if (pageCount > 0) {
+            PdfRenderer.Page page = renderer.openPage(0);
+            java.util.Arrays.fill(widths, Math.max(1, page.getWidth()));
+            java.util.Arrays.fill(heights, Math.max(1, page.getHeight()));
             page.close();
         }
         thread = new HandlerThread("pdf", Process.THREAD_PRIORITY_DISPLAY);
@@ -72,7 +77,47 @@ public final class PdfEngine {
     }
 
     /**
-     * Opens the document and measures all pages. Call off the main thread. Throws
+     * Measures the other pages on the render thread, one page per message so that page renders
+     * queued meanwhile are not held up. {@code changed} runs on the main thread, after the sizes
+     * are updated, if some page differs from the assumed size.
+     */
+    public void measureRest(final Runnable changed) {
+        if (pageCount < 2) return;
+        final float w0 = widths[0], h0 = heights[0];
+        final float[] w = new float[pageCount], h = new float[pageCount];
+        handler.post(new Runnable() {
+            int next = 1;
+            boolean differs;
+
+            @Override
+            public void run() {
+                if (closed) return;
+                try {
+                    PdfRenderer.Page page = renderer.openPage(next);
+                    w[next] = Math.max(1, page.getWidth());
+                    h[next] = Math.max(1, page.getHeight());
+                    page.close();
+                } catch (RuntimeException e) {
+                    w[next] = w0;
+                    h[next] = h0;
+                }
+                if (w[next] != w0 || h[next] != h0) differs = true;
+                if (++next < pageCount) {
+                    handler.post(this);
+                } else if (differs) {
+                    Tasks.main(() -> {
+                        if (closed) return;
+                        System.arraycopy(w, 1, widths, 1, pageCount - 1);
+                        System.arraycopy(h, 1, heights, 1, pageCount - 1);
+                        changed.run();
+                    });
+                }
+            }
+        });
+    }
+
+    /**
+     * Opens the document and measures its first page. Call off the main thread. Throws
      * SecurityException for password-protected files and IOException for unreadable ones.
      */
     public static PdfEngine open(ParcelFileDescriptor pfd) throws IOException {

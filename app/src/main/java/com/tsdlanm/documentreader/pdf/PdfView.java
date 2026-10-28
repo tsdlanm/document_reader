@@ -48,6 +48,8 @@ public final class PdfView extends View {
     /** Low-RAM phone: cache pages as RGB_565, half the memory of what PdfRenderer draws into. */
     private final boolean compact;
     private PdfEngine engine;
+    /** Bumped when the page layout changes; renders started before are dropped. */
+    private int generation;
     private float[] tops = new float[0], ws = new float[0], hs = new float[0];
     private float contentH;
     private int viewW, viewH;
@@ -147,6 +149,23 @@ public final class PdfView extends View {
         this.engine = engine;
         layoutPages();
         invalidate();
+        engine.measureRest(this::pageSizesChanged);
+    }
+
+    /** Some page is not the size of the first: lay out again, keeping the page being read in place. */
+    private void pageSizesChanged() {
+        if (engine == null || tops.length == 0) return;
+        int page = pageAt((sy + viewH / 2f) / zoom);
+        float within = ((sy + viewH / 2f) / zoom - tops[page]) / Math.max(1f, hs[page]);
+        generation++;
+        cache.evictAll();
+        pending.clear();
+        detailValid = false;
+        layoutPages();
+        if (page < tops.length) sy = (tops[page] + within * hs[page]) * zoom - viewH / 2f;
+        clampScroll();
+        invalidate();
+        scheduleDetail();
     }
 
     public void setOnPageChangeListener(OnPageChangeListener l) {
@@ -333,7 +352,9 @@ public final class PdfView extends View {
         }
         final int expectedW = w;
         final PdfEngine e = engine;
+        final int gen = generation;
         e.renderPage(i, w, h, compact, wanted, (index, bitmap) -> {
+            if (gen != generation) return;
             pending.delete(index);
             if (bitmap == null) {
                 if (engine == e && index >= wantFirst && index <= wantLast && !e.isClosed()) {
