@@ -37,6 +37,7 @@ import com.tsdlanm.documentreader.docx.DocModel.Row;
 import com.tsdlanm.documentreader.docx.DocModel.Run;
 import com.tsdlanm.documentreader.docx.DocModel.Table;
 import com.tsdlanm.documentreader.util.Tasks;
+import com.tsdlanm.documentreader.util.ZipImages;
 
 import java.util.ArrayList;
 import java.util.List;

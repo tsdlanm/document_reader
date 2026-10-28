@@ -277,6 +277,8 @@ public final class PageLayout {
     static final class ImageItem extends Item {
         final String part;
         final RectF rect;
+        /** Shown part of the picture: fractions cut off left, top, right, bottom; null for all of it. */
+        float[] crop;
 
         ImageItem(String part, float x, float y, float w, float h) {
             this.part = part;
@@ -285,10 +287,20 @@ public final class PageLayout {
             bottom = y + h;
         }
 
+        /** Width of the whole picture at this item's scale (larger than the item when cropped). */
+        float fullWidth() {
+            return crop == null ? rect.width() : rect.width() / Math.max(0.05f, 1 - crop[0] - crop[2]);
+        }
+
         @Override
         void draw(Canvas c, Painter painter) {
             Bitmap b = painter.image(this);
-            if (b != null) {
+            if (b != null && crop != null) {
+                int w = b.getWidth(), h = b.getHeight();
+                android.graphics.Rect src = new android.graphics.Rect(Math.round(w * crop[0]), Math.round(h * crop[1]),
+                        Math.round(w * (1 - crop[2])), Math.round(h * (1 - crop[3])));
+                c.drawBitmap(b, src, rect, BITMAP_PAINT);
+            } else if (b != null) {
                 c.drawBitmap(b, null, rect, BITMAP_PAINT);
             } else {
                 c.drawRect(rect, PLACEHOLDER_PAINT);
@@ -338,8 +350,43 @@ public final class PageLayout {
         }
     }
 
+    /** A filled or outlined rectangle, rounded rectangle or ellipse (slide shapes). */
+    static final class ShapeItem extends Item {
+        final RectF rect;
+        final int geometry, color;
+        /** Outline width, or 0 to fill. */
+        final float stroke;
+
+        ShapeItem(float l, float t, float r, float b, int geometry, int color, float stroke) {
+            rect = new RectF(l, t, r, b);
+            this.geometry = geometry;
+            this.color = color;
+            this.stroke = stroke;
+            top = t - stroke;
+            bottom = b + stroke;
+        }
+
+        @Override
+        void draw(Canvas c, Painter painter) {
+            Paint p = SHAPE_PAINT;
+            p.setColor(color);
+            p.setStyle(stroke > 0 ? Paint.Style.STROKE : Paint.Style.FILL);
+            p.setStrokeWidth(Math.max(stroke, 1f / painter.scale()));
+            if (geometry == DocModel.GEOM_ELLIPSE) {
+                c.drawOval(rect, p);
+            } else if (geometry == DocModel.GEOM_ROUND_RECT) {
+                // PowerPoint's default corner: a sixth of the shorter side.
+                float r = Math.min(rect.width(), rect.height()) / 6f;
+                c.drawRoundRect(rect, r, r, p);
+            } else {
+                c.drawRect(rect, p);
+            }
+        }
+    }
+
     // Items are only drawn on the main thread.
     private static final Paint BITMAP_PAINT = new Paint(Paint.FILTER_BITMAP_FLAG);
+    private static final Paint SHAPE_PAINT = new Paint(Paint.ANTI_ALIAS_FLAG);
     private static final Paint PLACEHOLDER_PAINT = new Paint();
     private static final Paint FILL_PAINT = new Paint();
     private static final Paint LINE_PAINT = new Paint();
@@ -367,13 +414,19 @@ public final class PageLayout {
             if (n.contains("sans")) return 0;
             if (n.contains("times") || n.contains("cambria") || n.contains("georgia") || n.contains("garamond")
                     || n.contains("book") || n.contains("palatino") || n.contains("serif")
-                    || n.contains("schoolbook") || n.contains("minion") || n.contains("constantia")) {
+                    || n.contains("schoolbook") || n.contains("minion") || n.contains("constantia")
+                    || n.contains("playfair") || n.contains("bodoni") || n.contains("didot") || n.contains("baskerville")
+                    || n.contains("lora") || n.contains("merriweather") || n.contains("rockwell") || n.contains("cormorant")
+                    || n.contains("century schoolbook") || n.contains("bookman") || n.contains("perpetua")) {
                 return 1;
             }
             return 0;
         }
 
         static synchronized Typeface get(String name, boolean bold, boolean italic) {
+            // A downloaded font with the original's metrics (Carlito for Calibri...) when there is one.
+            Typeface exact = FontDownloads.get(name, bold, italic);
+            if (exact != null) return exact;
             int f = family(name);
             int style = bold && italic ? Typeface.BOLD_ITALIC : bold ? Typeface.BOLD
                     : italic ? Typeface.ITALIC : Typeface.NORMAL;
@@ -392,6 +445,11 @@ public final class PageLayout {
         private static final String SAMPLE = "Pengoperasian pompa pada sebagian rumah kos masih dilakukan secara "
                 + "manual dengan memantau ketinggian air. The quick brown fox jumps over the lazy dog, 2026.";
         private static final java.util.Map<String, Float> SCALES = new java.util.HashMap<>();
+
+        /** Forgets measured scales: another font has arrived (see {@link FontDownloads}). */
+        static synchronized void reset() {
+            SCALES.clear();
+        }
 
         /** Width of {@link #SAMPLE} in em in the original font, or 0 when unknown. */
         static float wordWidth(String name, boolean bold) {
@@ -1041,8 +1099,14 @@ public final class PageLayout {
     }
 
     void emitFloating(DocModel.Drawing d, float x, float y, float w, float h, List<Item> out) {
-        if (d instanceof Image) out.add(new ImageItem(((Image) d).part, x, y, w, h));
-        else emitTextBox((TextBox) d, x, y, w, h, out);
+        if (d instanceof Image) {
+            Image img = (Image) d;
+            ImageItem item = new ImageItem(img.part, x, y, w, h);
+            if (img.crop != null) item.crop = img.crop;
+            out.add(item);
+        } else {
+            emitTextBox((TextBox) d, x, y, w, h, out);
+        }
     }
 
     /** Image size in layout units fitted into {@code maxW} x {@code maxH}; null when unknown. */
@@ -1063,12 +1127,36 @@ public final class PageLayout {
     /** Word's default text-box padding: 0.1 inch left/right, 0.05 inch top/bottom. */
     private static final float BOX_PAD_X = 7.2f * UNIT, BOX_PAD_Y = 3.6f * UNIT;
 
-    /** A text box: its border, and its own blocks laid out inside the padding. */
+    /** A text box: its fill, its own blocks laid out inside the padding, and its border. */
     void emitTextBox(TextBox tb, float x, float y, float w, float h, List<Item> out) {
-        Flow f = measureFlow(tb.blocks, Math.max(UNIT * 4, w - 2 * BOX_PAD_X), null);
-        emitFlow(f, x + BOX_PAD_X, y + BOX_PAD_Y, out);
-        if (tb.border != 0) {
-            float lw = 0.75f * UNIT;
+        float lw = tb.borderWidthEmu > 0 ? emu(tb.borderWidthEmu) : 0.75f * UNIT;
+        if (tb.geometry == DocModel.GEOM_LINE) {
+            if (tb.border != 0) {
+                float x1 = tb.flipH ? x + w : x, x2 = tb.flipH ? x : x + w;
+                float y1 = tb.flipV ? y + h : y, y2 = tb.flipV ? y : y + h;
+                out.add(new LineItem(x1, y1, x2, y2, lw, tb.border));
+            }
+            return;
+        }
+        if (tb.fill != 0) out.add(new ShapeItem(x, y, x + w, y + h, tb.geometry, tb.fill, 0));
+        if (!tb.blocks.isEmpty()) {
+            float l = BOX_PAD_X, t = BOX_PAD_Y, r = BOX_PAD_X, b = BOX_PAD_Y;
+            if (tb.insets != null) {
+                l = emu(tb.insets[0]);
+                t = emu(tb.insets[1]);
+                r = emu(tb.insets[2]);
+                b = emu(tb.insets[3]);
+            }
+            Flow f = measureFlow(tb.blocks, Math.max(UNIT * 4, w - l - r), null);
+            float ty = y + t;
+            if (tb.anchor == DocModel.CELL_CENTER) ty = y + t + (h - t - b - f.height) / 2f;
+            else if (tb.anchor == DocModel.CELL_BOTTOM) ty = y + h - b - f.height;
+            emitFlow(f, x + l, ty, out);
+        }
+        if (tb.border == 0) return;
+        if (tb.geometry != DocModel.GEOM_RECT) {
+            out.add(new ShapeItem(x, y, x + w, y + h, tb.geometry, tb.border, lw));
+        } else {
             out.add(new LineItem(x, y, x + w, y, lw, tb.border));
             out.add(new LineItem(x, y + h, x + w, y + h, lw, tb.border));
             out.add(new LineItem(x, y, x, y + h, lw, tb.border));
@@ -1540,6 +1628,13 @@ public final class PageLayout {
                     : lastNumber + 1;
             lastNumber = number;
             page = new Page(sc, firstOfSection, Numbering.format(number, sc.section.pageNumberFormat));
+            // Slide background, under everything else.
+            if (sc.section.background != 0) {
+                page.items.add(new RectItem(0, 0, sc.width, sc.height, sc.section.background));
+            }
+            if (sc.section.backgroundImage != null) {
+                page.items.add(new ImageItem(sc.section.backgroundImage, 0, 0, sc.width, sc.height));
+            }
             l.pages.add(page);
             publish(false);
             y = sc.top;

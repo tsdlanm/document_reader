@@ -139,7 +139,8 @@ public final class DocxParser {
     private String majorFont = "Calibri Light", minorFont = "Calibri";
     /** Word falls back to Times New Roman when the theme leaves the complex-script font empty. */
     private String majorBidiFont = "Times New Roman", minorBidiFont = "Times New Roman";
-    private int defaultHalfPoints = 22;
+    /** Word's size when neither the defaults nor the Normal style give one: 10 pt (not 11). */
+    private int defaultHalfPoints = 20;
     private int defaultTab = 720;
     private String defaultParagraphStyle;
     /** Style of the table whose cells are being read, or null. */

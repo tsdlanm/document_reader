@@ -37,11 +37,14 @@ import com.tsdlanm.documentreader.docx.DocModel;
 import com.tsdlanm.documentreader.docx.DocPageView;
 import com.tsdlanm.documentreader.docx.DocxAdapter;
 import com.tsdlanm.documentreader.docx.DocxParser;
+import com.tsdlanm.documentreader.docx.FontMatch;
 import com.tsdlanm.documentreader.docx.PageLayout;
+import com.tsdlanm.documentreader.docx.PptxParser;
 import com.tsdlanm.documentreader.pdf.PdfEngine;
 import com.tsdlanm.documentreader.pdf.PdfView;
 import com.tsdlanm.documentreader.util.AndroidXml;
 import com.tsdlanm.documentreader.util.Tasks;
+import com.tsdlanm.documentreader.xlsx.CellPanel;
 import com.tsdlanm.documentreader.xlsx.SheetData;
 import com.tsdlanm.documentreader.xlsx.SheetView;
 import com.tsdlanm.documentreader.xlsx.XlsxWorkbook;
@@ -86,7 +89,7 @@ public final class ViewerActivity extends Activity {
     private ListView docList;
     private DocxAdapter docAdapter;
     private SheetView sheetView;
-    private TextView cellBar;
+    private CellPanel cellPanel;
     private TextView sheetMessage;
     private LinearLayout tabs;
     private int currentSheet;
@@ -95,6 +98,8 @@ public final class ViewerActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // Office-compatible fonts; usually already cached, so ready before the layout needs them.
+        FontMatch.prefetch(this);
         uri = uriFrom(getIntent());
         if (uri == null) {
             finish();
@@ -188,16 +193,21 @@ public final class ViewerActivity extends Activity {
                         r.doc = DocxParser.parse(r.zip, AndroidXml.INSTANCE);
                         // Pages are laid out later, while the first ones are already shown.
                         if (!r.doc.blocks.isEmpty()) r.pages = PageLayout.create(r.doc);
+                    } else if (PptxParser.isPptx(r.zip)) {
+                        r.type = DocumentType.PPTX;
+                        r.doc = PptxParser.parse(r.zip, AndroidXml.INSTANCE, ctx.getString(R.string.chart));
+                        if (!r.doc.blocks.isEmpty()) r.pages = PageLayout.create(r.doc);
                     } else if (XlsxWorkbook.isXlsx(r.zip)) {
                         r.type = DocumentType.XLSX;
                         r.workbook = XlsxWorkbook.open(r.zip, AndroidXml.INSTANCE);
-                        if (!r.workbook.sheets.isEmpty()) r.firstSheet = r.workbook.loadSheet(0, maxCells());
+                        if (!r.workbook.sheets.isEmpty()) r.firstSheet = r.workbook.loadSheet(r.workbook.activeSheet, maxCells());
                     } else {
                         r.error = R.string.error_unsupported;
                     }
                     break;
                 case LEGACY_OFFICE:
-                    r.error = "Excel".equals(label) ? R.string.error_legacy_xls : R.string.error_legacy_doc;
+                    r.error = "Excel".equals(label) ? R.string.error_legacy_xls
+                            : "PowerPoint".equals(label) ? R.string.error_legacy_ppt : R.string.error_legacy_doc;
                     break;
                 default:
                     r.error = R.string.error_unsupported;
@@ -299,6 +309,7 @@ public final class ViewerActivity extends Activity {
                 showPdf(r.pdf);
                 break;
             case DOCX:
+            case PPTX:
                 showDocx(r);
                 break;
             case XLSX:
@@ -402,7 +413,14 @@ public final class ViewerActivity extends Activity {
         docPages.setOnPageChangeListener(page -> updatePageSubtitle());
         root.addView(docPages, 0, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT));
-        if (!layoutStarted) startLayout(loaded.pages);
+        if (!layoutStarted) {
+            layoutStarted = true;
+            // Waits briefly for the Office-compatible fonts, so the whole document uses one font.
+            final PageLayout l = loaded.pages;
+            FontMatch.whenReady(() -> {
+                if (!destroyed && loaded != null && loaded.pages == l) startLayout(l);
+            }, 1500);
+        }
     }
 
     /** Lays the pages out in the background, showing each batch as soon as it is ready. */
@@ -437,7 +455,8 @@ public final class ViewerActivity extends Activity {
     private void updatePageSubtitle() {
         ActionBar bar = getActionBar();
         if (bar == null || docPages == null || laidOut.isEmpty()) return;
-        String text = getString(R.string.page_of, docPages.getCurrentPage() + 1, laidOut.size());
+        String text = getString(loaded.type == DocumentType.PPTX ? R.string.slide_of : R.string.page_of,
+                docPages.getCurrentPage() + 1, laidOut.size());
         // More pages are still on the way.
         bar.setSubtitle(layoutDone ? text : text + "…");
     }
@@ -497,22 +516,11 @@ public final class ViewerActivity extends Activity {
         box.setOrientation(LinearLayout.VERTICAL);
         box.setBackgroundColor(Color.WHITE);
 
-        cellBar = new TextView(this);
-        cellBar.setSingleLine(true);
-        cellBar.setEllipsize(TextUtils.TruncateAt.END);
-        cellBar.setTextColor(0xFF202124);
-        cellBar.setBackgroundColor(0xFFF8F9FA);
-        cellBar.setPadding(dp(12), dp(8), dp(12), dp(8));
-        cellBar.setText(R.string.tap_cell);
-        box.addView(cellBar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT));
-
         FrameLayout sheetArea = new FrameLayout(this);
         sheetView = new SheetView(this);
-        sheetView.setOnCellSelectedListener((row, col, text) -> {
-            String ref = SheetData.columnName(col) + (row + 1);
-            cellBar.setText(text == null || text.isEmpty() ? ref : ref + "   " + text);
-        });
+        sheetView.setZip(loaded.zip);
+        sheetView.setOnCellSelectedListener((row, col, text) ->
+                cellPanel.show(SheetData.columnName(col) + (row + 1), text));
         sheetArea.addView(sheetView);
         sheetMessage = new TextView(this);
         sheetMessage.setGravity(Gravity.CENTER);
@@ -522,6 +530,10 @@ public final class ViewerActivity extends Activity {
         sheetArea.addView(sheetMessage, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT));
         box.addView(sheetArea, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        // The tapped cell, between the sheet and its tabs.
+        cellPanel = new CellPanel(this);
+        box.addView(cellPanel, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
 
         if (r.workbook.sheets.size() > 1) {
             HorizontalScrollView scroll = new HorizontalScrollView(this);
@@ -547,8 +559,12 @@ public final class ViewerActivity extends Activity {
         if (r.workbook.sheets.isEmpty()) {
             sheetMessage.setVisibility(View.VISIBLE);
         } else {
-            showSheet(0, r.firstSheet);
+            // Opens on the sheet that was open in Excel, like Excel itself.
+            showSheet(r.workbook.activeSheet, r.firstSheet);
             r.firstSheet = null;
+            final View active = tabs != null ? tabs.getChildAt(r.workbook.activeSheet) : null;
+            if (active != null) active.post(() -> active.requestRectangleOnScreen(
+                    new android.graphics.Rect(0, 0, active.getWidth(), active.getHeight())));
         }
     }
 
@@ -588,7 +604,7 @@ public final class ViewerActivity extends Activity {
         if (sheetToken == 0) sheetToken = 1;
         highlightTab();
         sheetView.setData(data);
-        cellBar.setText(R.string.tap_cell);
+        cellPanel.hide();
         sheetMessage.setText(R.string.sheet_empty);
         sheetMessage.setVisibility(data.isEmpty() ? View.VISIBLE : View.GONE);
         if (data.truncated) Toast.makeText(this, R.string.sheet_truncated, Toast.LENGTH_LONG).show();
@@ -651,6 +667,28 @@ public final class ViewerActivity extends Activity {
         super.onConfigurationChanged(newConfig);
         // Rotation is handled in place (no reload); tables and images need the new width.
         if (docList != null && docAdapter != null) bindDocAdapter(docAdapter.getTextScale());
+    }
+
+    /** Back first closes the cell panel step by step, then leaves. */
+    @Override
+    @SuppressWarnings("deprecation")
+    public void onBackPressed() {
+        if (cellPanel != null && cellPanel.isExpanded()) {
+            cellPanel.setExpanded(false);
+        } else if (cellPanel != null && cellPanel.isOpen()) {
+            cellPanel.hide();
+            sheetView.clearSelection();
+        } else {
+            super.onBackPressed();
+        }
+    }
+
+    @Override
+    public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        if (pdfView != null) pdfView.trimMemory(level);
+        if (docPages != null) docPages.trimMemory(level);
+        if (sheetView != null) sheetView.trimMemory(level);
     }
 
     @Override

@@ -5,6 +5,7 @@ import android.animation.AnimatorListenerAdapter;
 import android.animation.ValueAnimator;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.ComponentCallbacks2;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
@@ -28,7 +29,9 @@ import android.widget.OverScroller;
 import android.widget.Toast;
 
 import com.tsdlanm.documentreader.R;
+import com.tsdlanm.documentreader.util.MemoryBudget;
 import com.tsdlanm.documentreader.util.Tasks;
+import com.tsdlanm.documentreader.util.ZipImages;
 
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -121,7 +124,7 @@ public final class DocPageView extends View {
         scroller = new OverScroller(context);
         setBackgroundColor(BACKGROUND);
 
-        int maxKb = (int) Math.min(Integer.MAX_VALUE, Runtime.getRuntime().maxMemory() / 1024 / 8);
+        int maxKb = MemoryBudget.kb(context, 24 * 1024, 8, 0, 2);
         images = new LruCache<String, Bitmap>(maxKb) {
             @Override
             protected int sizeOf(String key, Bitmap value) {
@@ -129,7 +132,7 @@ public final class DocPageView extends View {
             }
         };
         // A handful of screen-wide pages: enough for what is visible plus its neighbours.
-        int pagesKb = (int) Math.min(32 * 1024, Runtime.getRuntime().maxMemory() / 1024 / 5);
+        int pagesKb = MemoryBudget.kb(context, 32 * 1024, 5, 3, 2);
         pageBitmaps = new LruCache<Integer, Bitmap>(pagesKb) {
             @Override
             protected int sizeOf(Integer key, Bitmap value) {
@@ -137,7 +140,7 @@ public final class DocPageView extends View {
             }
         };
         // Zoomed tiles (512 KB each): a couple of screens' worth.
-        int tilesKb = (int) Math.min(16 * 1024, Runtime.getRuntime().maxMemory() / 1024 / 8);
+        int tilesKb = MemoryBudget.kb(context, 16 * 1024, 8, 2, 2);
         tiles = new LruCache<Long, Bitmap>(tilesKb) {
             @Override
             protected int sizeOf(Long key, Bitmap value) {
@@ -254,6 +257,22 @@ public final class DocPageView extends View {
         dropBitmaps();
         renderer.shutdown();
         images.evictAll();
+    }
+
+    /**
+     * Frees cached bitmaps when the system runs short of memory: the zoom tiles and pictures
+     * first, everything once the app is in the background. All of it is redrawn on demand.
+     */
+    public void trimMemory(int level) {
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN) {
+            dropBitmaps();
+            images.evictAll();
+        } else if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
+            dropTiles();
+            images.trimToSize(images.size() / 2);
+            pageBitmaps.trimToSize(pageBitmaps.size() / 2);
+        }
+        invalidate();
     }
 
     private void dropBitmaps() {
@@ -939,7 +958,7 @@ public final class DocPageView extends View {
      */
     private Bitmap imageFor(final PageLayout.ImageItem item, float scale) {
         // Decode at twice the fit-to-width size: sharp enough when zoomed in a little.
-        final int targetW = Math.max(16, Math.min(2048, Math.round(item.rect.width() * scale * 2)));
+        final int targetW = Math.max(16, Math.min(2048, Math.round(item.fullWidth() * scale * 2)));
         final String key = item.part + "@" + targetW;
         Bitmap b = images.get(key);
         final ZipFile z = zip;

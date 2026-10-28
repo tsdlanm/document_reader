@@ -10,11 +10,12 @@ public final class SheetData {
 
     static final class Row {
         int size;
-        int[] cols = new int[4];
+        // char: column (< 16384) and style indexes (< 64000) fit in 16 bits, half of an int.
+        char[] cols = new char[4];
         byte[] kinds = new byte[4];
         double[] nums;
         String[] texts = new String[4];
-        int[] styles = new int[4];
+        char[] styles = new char[4];
         /** Custom height in points, or 0 for the default; -1 for a hidden row. */
         float height;
 
@@ -25,10 +26,10 @@ public final class SheetData {
                 else return;
             }
             if (size == cols.length) grow();
-            cols[size] = col;
+            cols[size] = (char) col;
             kinds[size] = kind;
             texts[size] = text;
-            styles[size] = style;
+            styles[size] = (char) Math.max(0, Math.min(style, Character.MAX_VALUE));
             if (kind == NUMBER) {
                 if (nums == null) nums = new double[cols.length];
                 nums[size] = num;
@@ -37,7 +38,15 @@ public final class SheetData {
         }
 
         private void grow() {
-            int n = cols.length * 2;
+            resize(Math.max(4, cols.length * 2));
+        }
+
+        /** Drops the spare capacity once the row is complete; a big sheet has many rows. */
+        void trim() {
+            if (size < cols.length) resize(size);
+        }
+
+        private void resize(int n) {
             cols = Arrays.copyOf(cols, n);
             kinds = Arrays.copyOf(kinds, n);
             texts = Arrays.copyOf(texts, n);
@@ -68,6 +77,28 @@ public final class SheetData {
     public final List<int[]> merges;
     /** True when the sheet had more cells than the memory limit allowed. */
     public final boolean truncated;
+    /** Size of rows and columns without their own: points, and pixels at 96 dpi. */
+    public float defaultRowHeight = 15f, defaultColWidth = 64f;
+    /** False when the sheet hides Excel's grey gridlines (only real borders are drawn). */
+    public boolean showGrid = true;
+    /** Rows at the top and columns at the left kept in place while scrolling (freeze panes). */
+    public int frozenRows, frozenCols;
+    /** First row and column shown when the file was saved (Excel opens scrolled there). */
+    public int topRow, topCol;
+    /** Pictures and charts floating over the cells. */
+    public final List<Picture> pictures = new ArrayList<>();
+
+    /**
+     * A picture (or a chart, drawn as a labelled box) anchored to cells: its top-left corner is
+     * {@code fromCol/fromRow} plus offsets, its bottom-right {@code toCol/toRow} plus offsets, or
+     * when {@code toCol < 0}, the top-left plus {@code width/height}. Offsets and sizes in EMU.
+     */
+    public static final class Picture {
+        /** Image part in the zip, or null for a chart. */
+        public String part;
+        public int fromCol, fromRow, toCol = -1, toRow;
+        public long fromColOff, fromRowOff, toColOff, toRowOff, width, height;
+    }
 
     private final Row[] rows;
     private final CellStyle[] styles;

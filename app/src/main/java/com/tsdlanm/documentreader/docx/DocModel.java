@@ -152,6 +152,8 @@ public final class DocModel {
     public static final class Image extends Drawing {
         /** Zip entry name of the image data. */
         public final String part;
+        /** Fractions of the picture cut off left, top, right and bottom; null when shown whole. */
+        public float[] crop;
 
         public Image(String part, long widthEmu, long heightEmu) {
             super(widthEmu, heightEmu);
@@ -159,11 +161,27 @@ public final class DocModel {
         }
     }
 
-    /** A floating text box: its own blocks inside an optional border. */
+    public static final int GEOM_RECT = 0, GEOM_ROUND_RECT = 1, GEOM_ELLIPSE = 2, GEOM_LINE = 3;
+
+    /**
+     * A floating text box: its own blocks inside an optional border. Slides use it for every shape,
+     * so it can also have a fill, another outline shape, its own padding and vertical anchoring.
+     */
     public static final class TextBox extends Drawing {
         public final List<Block> blocks;
         /** Border colour (ARGB), 0 for none. */
         public int border;
+        /** Border width in EMU, 0 for Word's 0.75 pt. */
+        public long borderWidthEmu;
+        /** Fill colour (ARGB), 0 for none. */
+        public int fill;
+        /** GEOM_*: the outline's shape. A line runs corner to corner, mirrored by flipH / flipV. */
+        public int geometry = GEOM_RECT;
+        public boolean flipH, flipV;
+        /** Text padding (left, top, right, bottom) in EMU, or null for Word's default. */
+        public long[] insets;
+        /** Vertical position of the text: CELL_TOP, CELL_CENTER or CELL_BOTTOM. */
+        public int anchor = CELL_TOP;
 
         TextBox(List<Block> blocks, long widthEmu, long heightEmu) {
             super(widthEmu, heightEmu);
@@ -221,6 +239,9 @@ public final class DocModel {
         public List<Block> header, footer, firstHeader, firstFooter;
         /** Text columns: widths and the gap after each (twips). One column when empty. */
         public int[] columnWidths = new int[0], columnGaps = new int[0];
+        /** Page background colour (ARGB, 0 for white) and picture (zip entry, or null); for slides. */
+        public int background;
+        public String backgroundImage;
     }
 
     /** A border line; {@link #NONE} hides an inherited border. Width in eighths of a point. */

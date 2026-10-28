@@ -1,4 +1,4 @@
-package com.tsdlanm.documentreader.docx;
+package com.tsdlanm.documentreader.util;
 
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -8,12 +8,12 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
 /** Decodes pictures stored in a document's zip at about the size they are shown. */
-final class ZipImages {
+public final class ZipImages {
     private ZipImages() {
     }
 
     /** Returns null for missing, unsupported (EMF/WMF) or corrupt images. */
-    static Bitmap decode(ZipFile zip, String part, int targetW) {
+    public static Bitmap decode(ZipFile zip, String part, int targetW) {
         try {
             ZipEntry e = zip.getEntry(part);
             if (e == null || e.getSize() > 30L * 1024 * 1024) return null;

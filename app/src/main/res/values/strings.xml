@@ -2,21 +2,23 @@
 <resources>
     <string name="app_name">Document Reader</string>
     <string name="open_file">Open file</string>
-    <string name="supported_formats">PDF · Word (.docx) · Excel (.xlsx)</string>
+    <string name="supported_formats">PDF · Word (.docx) · Excel (.xlsx) · PowerPoint (.pptx)</string>
     <string name="recent_files">Recent files</string>
-    <string name="no_recent">No recent files yet.\nTap \"Open file\" to read a PDF, Word or Excel document.</string>
+    <string name="no_recent">No recent files yet.\nTap \"Open file\" to read a PDF, Word, Excel or PowerPoint document.</string>
     <string name="remove_recent">Remove from list</string>
     <string name="clear_recent">Clear list</string>
     <string name="error_no_picker">No file picker is available on this device.</string>
     <string name="error_open">This file could not be opened. It may be damaged.</string>
-    <string name="error_unsupported">This file type is not supported. Supported: PDF, Word (.docx) and Excel (.xlsx).</string>
+    <string name="error_unsupported">This file type is not supported. Supported: PDF, Word (.docx), Excel (.xlsx) and PowerPoint (.pptx).</string>
     <string name="error_legacy_doc">Old Word files (.doc) are not supported yet. Save the file as .docx and try again.</string>
+    <string name="error_legacy_ppt">Old PowerPoint files (.ppt) are not supported yet. Save the file as .pptx and try again.</string>
     <string name="error_legacy_xls">Old Excel files (.xls) are not supported yet. Save the file as .xlsx and try again.</string>
     <string name="error_pdf_password">Password-protected PDFs are not supported.</string>
     <string name="error_permission">Storage permission is needed to open this file.</string>
     <string name="error_not_found">The file was not found or can no longer be accessed. Open it again from \"Open file\".</string>
     <string name="error_too_large">This file is too large for the memory of this device.</string>
     <string name="page_of">Page %1$d of %2$d</string>
+    <string name="slide_of">Slide %1$d of %2$d</string>
     <string name="go_to_page">Go to page</string>
     <string name="page_hint">1 – %d</string>
     <string name="text_bigger">A+</string>
@@ -25,7 +27,7 @@
     <string name="sheet_empty">This sheet is empty.</string>
     <string name="sheet_truncated">The sheet is very large; only the first part is shown.</string>
     <string name="copied">Copied</string>
+    <string name="chart">Chart</string>
     <string name="reading_mode">Reading mode</string>
     <string name="page_mode">Page layout</string>
-    <string name="tap_cell">Tap a cell to see its full content.</string>
 </resources>

@@ -34,8 +34,10 @@ public final class MainActivity extends Activity {
             "application/pdf",
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
             "application/msword",
             "application/vnd.ms-excel",
+            "application/vnd.ms-powerpoint",
     };
 
     private final List<RecentFiles.Item> items = new ArrayList<>();
@@ -46,6 +48,8 @@ public final class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // Start fetching the Office-compatible fonts before a document is opened.
+        com.tsdlanm.documentreader.docx.FontMatch.prefetch(this);
         float d = getResources().getDisplayMetrics().density;
         int pad = Math.round(16 * d);
 

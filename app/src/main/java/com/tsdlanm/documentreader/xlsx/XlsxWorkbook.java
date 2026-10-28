@@ -30,12 +30,22 @@ public final class XlsxWorkbook {
     private static final int MAX_COLS = 16384;
 
     public final List<Sheet> sheets = new ArrayList<>();
+    /** The sheet that was open when the file was saved (index into {@link #sheets}). */
+    public int activeSheet;
     private final ZipFile zip;
     private final XmlFactory xml;
     private boolean date1904;
     private String sharedStringsPart, stylesPart, themePart;
     private String[] sharedStrings;
     private CellStyle[] styles;
+    private int[] theme;
+    /** Font of each shared string written as rich text (from its first run), or null. */
+    private Font[] richFonts;
+    /** Cell styles with a rich-text font applied, keyed by base style and font. */
+    private final Map<String, Integer> richStyles = new HashMap<>();
+    /** The same, keyed by base style and shared string, so each cell's lookup is cheap. */
+    private final Map<Long, Integer> richByString = new HashMap<>();
+    private final List<CellStyle> styleList = new ArrayList<>();
 
     private XlsxWorkbook(ZipFile zip, XmlFactory xml) {
         this.zip = zip;
@@ -69,6 +79,7 @@ public final class XlsxWorkbook {
         if (part == null) throw new IOException("No workbook part");
         try {
             XmlPullParser p = part.parser;
+            int activeTab = 0, raw = -1;
             int e;
             while ((e = p.next()) != XmlPullParser.END_DOCUMENT) {
                 if (e != XmlPullParser.START_TAG) continue;
@@ -76,7 +87,11 @@ public final class XlsxWorkbook {
                 if ("workbookPr".equals(n)) {
                     String v = XmlUtil.attr(p, "date1904");
                     date1904 = "1".equals(v) || "true".equals(v);
+                } else if ("workbookView".equals(n)) {
+                    activeTab = Math.max(0, XmlUtil.intAttr(p, "activeTab", 0));
                 } else if ("sheet".equals(n)) {
+                    // activeTab counts every sheet, hidden ones and chart sheets included.
+                    raw++;
                     String state = XmlUtil.attr(p, "state");
                     if ("hidden".equals(state) || "veryHidden".equals(state)) continue;
                     String id = XmlUtil.attr(p, "id");
@@ -86,6 +101,7 @@ public final class XlsxWorkbook {
                     if (ZipParts.entry(zip, rel.target) == null) continue;
                     String name = XmlUtil.attr(p, "name");
                     sheets.add(new Sheet(name == null ? "Sheet" + (sheets.size() + 1) : name, rel.target));
+                    if (raw == activeTab) activeSheet = sheets.size() - 1;
                 }
             }
         } finally {
@@ -98,15 +114,138 @@ public final class XlsxWorkbook {
      * is marked truncated.
      */
     public synchronized SheetData loadSheet(int index, long maxCells) throws IOException, XmlPullParserException {
+        // Styles first: rich-text runs in the shared strings use the theme colours.
+        if (styles == null) {
+            styles = readStyles();
+            styleList.addAll(java.util.Arrays.asList(styles));
+        }
         if (sharedStrings == null) sharedStrings = readSharedStrings();
-        if (styles == null) styles = readStyles();
         Sheet sheet = sheets.get(index);
         ZipParts.Part part = ZipParts.open(zip, sheet.part, xml);
         if (part == null) throw new IOException("Missing sheet");
         try {
-            return readSheet(part.parser, maxCells);
+            return readSheet(part.parser, maxCells, sheet.part);
         } finally {
             part.close();
+        }
+    }
+
+    /** {row, col} of a reference such as "B12", or null. */
+    static int[] parseCell(String ref) {
+        if (ref == null || ref.isEmpty()) return null;
+        int col = parseColumn(ref);
+        int i = 0;
+        while (i < ref.length() && !Character.isDigit(ref.charAt(i))) i++;
+        int row = XmlUtil.parseInt(ref.substring(i), 0) - 1;
+        return col < 0 || row < 0 ? null : new int[]{row, col};
+    }
+
+    // ---------------------------------------------------------------- drawing
+
+    /** Reads the pictures and charts anchored on a sheet (xl/drawings/drawingN.xml). */
+    private void readDrawing(String path, List<SheetData.Picture> out) throws IOException, XmlPullParserException {
+        Map<String, ZipParts.Rel> rels = ZipParts.rels(zip, path, xml);
+        ZipParts.Part part = ZipParts.open(zip, path, xml);
+        if (part == null) return;
+        try {
+            XmlPullParser p = part.parser;
+            int e;
+            while ((e = p.next()) != XmlPullParser.END_DOCUMENT) {
+                if (e != XmlPullParser.START_TAG) continue;
+                String n = p.getName();
+                if (!"twoCellAnchor".equals(n) && !"oneCellAnchor".equals(n) && !"absoluteAnchor".equals(n)) continue;
+                SheetData.Picture pic = new SheetData.Picture();
+                boolean shown = false;
+                int d = p.getDepth();
+                while (XmlUtil.nextChild(p, d)) {
+                    switch (p.getName()) {
+                        case "from":
+                        case "to": {
+                            boolean from = "from".equals(p.getName());
+                            int d2 = p.getDepth();
+                            int col = 0, row = 0;
+                            long colOff = 0, rowOff = 0;
+                            while (XmlUtil.nextChild(p, d2)) {
+                                String c = p.getName();
+                                String v = XmlUtil.text(p).trim();
+                                if ("col".equals(c)) col = XmlUtil.parseInt(v, 0);
+                                else if ("row".equals(c)) row = XmlUtil.parseInt(v, 0);
+                                else if ("colOff".equals(c)) colOff = parseLong(v);
+                                else if ("rowOff".equals(c)) rowOff = parseLong(v);
+                            }
+                            if (from) {
+                                pic.fromCol = col;
+                                pic.fromRow = row;
+                                pic.fromColOff = colOff;
+                                pic.fromRowOff = rowOff;
+                            } else {
+                                pic.toCol = col;
+                                pic.toRow = row;
+                                pic.toColOff = colOff;
+                                pic.toRowOff = rowOff;
+                            }
+                            break;
+                        }
+                        case "pos":
+                            // absoluteAnchor: an offset from the sheet's top-left corner.
+                            pic.fromColOff = parseLong(XmlUtil.attr(p, "x"));
+                            pic.fromRowOff = parseLong(XmlUtil.attr(p, "y"));
+                            XmlUtil.skip(p);
+                            break;
+                        case "ext":
+                            pic.width = parseLong(XmlUtil.attr(p, "cx"));
+                            pic.height = parseLong(XmlUtil.attr(p, "cy"));
+                            XmlUtil.skip(p);
+                            break;
+                        case "pic": {
+                            String embed = findEmbed(p);
+                            ZipParts.Rel rel = embed == null ? null : rels.get(embed);
+                            if (rel != null && !rel.external) {
+                                pic.part = rel.target;
+                                shown = true;
+                            }
+                            break;
+                        }
+                        case "graphicFrame":
+                            // A chart: shown as a labelled box so the reader knows something is there.
+                            shown = true;
+                            XmlUtil.skip(p);
+                            break;
+                        default:
+                            XmlUtil.skip(p);
+                    }
+                }
+                if (shown) out.add(pic);
+            }
+        } finally {
+            part.close();
+        }
+    }
+
+    /** The r:embed of the first a:blip inside the current element; leaves the parser on its end tag. */
+    private static String findEmbed(XmlPullParser p) throws XmlPullParserException, IOException {
+        String embed = null;
+        int depth = 1;
+        while (depth > 0) {
+            int e = p.next();
+            if (e == XmlPullParser.START_TAG) {
+                depth++;
+                if (embed == null && "blip".equals(p.getName())) embed = XmlUtil.attr(p, "embed");
+            } else if (e == XmlPullParser.END_TAG) {
+                depth--;
+            } else if (e == XmlPullParser.END_DOCUMENT) {
+                break;
+            }
+        }
+        return embed;
+    }
+
+    private static long parseLong(String v) {
+        if (v == null) return 0;
+        try {
+            return Long.parseLong(v.trim());
+        } catch (NumberFormatException e) {
+            return 0;
         }
     }
 
@@ -116,29 +255,75 @@ public final class XlsxWorkbook {
         ZipParts.Part part = ZipParts.open(zip, sharedStringsPart, xml);
         if (part == null) return new String[0];
         List<String> out = new ArrayList<>();
+        List<Font> fonts = new ArrayList<>();
+        boolean anyRich = false;
         try {
             XmlPullParser p = part.parser;
             StringBuilder sb = new StringBuilder();
+            Font first = null;
+            int runs = 0;
+            boolean inFirstRun = false;
             int e;
             while ((e = p.next()) != XmlPullParser.END_DOCUMENT) {
                 if (e == XmlPullParser.START_TAG) {
                     String n = p.getName();
-                    if ("si".equals(n)) sb.setLength(0);
-                    else if ("rPh".equals(n) || "phoneticPr".equals(n)) XmlUtil.skip(p);
-                    else if ("t".equals(n)) sb.append(XmlUtil.text(p));
+                    if ("si".equals(n)) {
+                        sb.setLength(0);
+                        first = null;
+                        runs = 0;
+                    } else if ("r".equals(n)) {
+                        inFirstRun = runs++ == 0;
+                    } else if ("rPh".equals(n) || "phoneticPr".equals(n)) {
+                        XmlUtil.skip(p);
+                    } else if ("rPr".equals(n)) {
+                        // Rich text: one font per cell is drawn, the first run's; a first run
+                        // without its own font keeps the cell style's.
+                        if (inFirstRun) first = readFont(p, theme != null ? theme : new int[0]);
+                        else XmlUtil.skip(p);
+                    } else if ("t".equals(n)) {
+                        sb.append(XmlUtil.text(p));
+                    }
+                } else if (e == XmlPullParser.END_TAG && "r".equals(p.getName())) {
+                    inFirstRun = false;
                 } else if (e == XmlPullParser.END_TAG && "si".equals(p.getName())) {
                     out.add(sb.toString());
+                    fonts.add(first);
+                    if (first != null) anyRich = true;
                 }
             }
         } finally {
             part.close();
         }
+        richFonts = anyRich ? fonts.toArray(new Font[0]) : null;
         return out.toArray(new String[0]);
+    }
+
+    /** The cell style {@code style} with a rich-text run's font; a new style index when it differs. */
+    private int richStyle(int style, Font f) {
+        String key = style + "|" + f.size + "|" + f.bold + f.italic + f.underline + "|" + f.color + "|" + f.name;
+        Integer id = richStyles.get(key);
+        // Style indexes are stored in 16 bits per cell.
+        if (id == null && styleList.size() >= Character.MAX_VALUE) return style;
+        if (id == null) {
+            CellStyle base = style >= 0 && style < styleList.size() ? styleList.get(style) : CellStyle.DEFAULT;
+            CellStyle cs = base.copy();
+            if (f.size > 0) cs.fontSize = f.size / 11f;
+            cs.bold = f.bold;
+            cs.italic = f.italic;
+            cs.underline = f.underline;
+            if (f.color != 0) cs.textColor = f.color;
+            if (f.name != null) cs.font = f.name;
+            id = styleList.size();
+            styleList.add(cs);
+            richStyles.put(key, id);
+        }
+        return id;
     }
 
     // ------------------------------------------------------------------ styles
 
     private static final class Font {
+        String name;
         boolean bold, italic, underline;
         int color;
         float size;
@@ -146,11 +331,13 @@ public final class XlsxWorkbook {
 
     private CellStyle[] readStyles() throws IOException, XmlPullParserException {
         int[] theme = readTheme();
+        this.theme = theme;
         ZipParts.Part part = ZipParts.open(zip, stylesPart, xml);
         if (part == null) return new CellStyle[0];
         Map<Integer, NumberFormat> formats = new HashMap<>();
         List<Font> fonts = new ArrayList<>();
         List<Integer> fills = new ArrayList<>();
+        List<Object[]> borders = new ArrayList<>();
         List<CellStyle> xfs = new ArrayList<>();
         try {
             XmlPullParser p = part.parser;
@@ -180,6 +367,12 @@ public final class XlsxWorkbook {
                             else XmlUtil.skip(p);
                         }
                         break;
+                    case "borders":
+                        while (XmlUtil.nextChild(p, d)) {
+                            if ("border".equals(p.getName())) borders.add(readBorder(p, theme));
+                            else XmlUtil.skip(p);
+                        }
+                        break;
                     case "cellXfs":
                         while (XmlUtil.nextChild(p, d)) {
                             if (!"xf".equals(p.getName())) {
@@ -198,9 +391,19 @@ public final class XlsxWorkbook {
                                 cs.underline = f.underline;
                                 cs.textColor = f.color;
                                 cs.fontSize = f.size;
+                                cs.font = f.name;
                             }
                             int fillId = XmlUtil.intAttr(p, "fillId", 0);
                             if (fillId >= 0 && fillId < fills.size()) cs.fillColor = fills.get(fillId);
+                            int borderId = XmlUtil.intAttr(p, "borderId", 0);
+                            if (borderId >= 0 && borderId < borders.size()) {
+                                Object[] b = borders.get(borderId);
+                                if (b != null) {
+                                    cs.borderStyle = (byte[]) b[0];
+                                    cs.borderColor = (int[]) b[1];
+                                    cs.diagonals = (Integer) b[2];
+                                }
+                            }
                             int d2 = p.getDepth();
                             while (XmlUtil.nextChild(p, d2)) {
                                 if ("alignment".equals(p.getName())) {
@@ -211,6 +414,14 @@ public final class XlsxWorkbook {
                                     } else if ("right".equals(h)) cs.align = CellStyle.ALIGN_RIGHT;
                                     String w = XmlUtil.attr(p, "wrapText");
                                     cs.wrap = "1".equals(w) || "true".equals(w);
+                                    String v = XmlUtil.attr(p, "vertical");
+                                    if ("top".equals(v)) cs.vAlign = CellStyle.V_TOP;
+                                    else if ("center".equals(v) || "justify".equals(v) || "distributed".equals(v)) {
+                                        cs.vAlign = CellStyle.V_CENTER;
+                                    }
+                                    cs.indent = Math.max(0, Math.min(15, XmlUtil.intAttr(p, "indent", 0)));
+                                    int rot = XmlUtil.intAttr(p, "textRotation", 0);
+                                    cs.rotation = rot == 255 || (rot > 0 && rot <= 180) ? rot : 0;
                                 }
                                 XmlUtil.skip(p);
                             }
@@ -224,8 +435,9 @@ public final class XlsxWorkbook {
         } finally {
             part.close();
         }
-        // Sizes are drawn relative to the workbook's default font.
-        float base = fonts.isEmpty() || fonts.get(0).size <= 0 ? 11f : fonts.get(0).size;
+        // The view's base text size is 11 pt; sizes are absolute, as in Excel (a 14 pt cell is 14 pt
+        // whatever the workbook's default font).
+        float base = 11f;
         for (CellStyle cs : xfs) {
             cs.fontSize = cs.fontSize > 0 ? cs.fontSize / base : 1f;
             if (Math.abs(cs.fontSize - 1f) < 0.01f) cs.fontSize = 1f;
@@ -250,6 +462,10 @@ public final class XlsxWorkbook {
                 case "sz":
                     f.size = XmlUtil.floatAttr(p, "val", 0);
                     break;
+                case "name":
+                case "rFont":
+                    f.name = XmlUtil.attr(p, "val");
+                    break;
                 case "color":
                     f.color = color(p, theme, true);
                     break;
@@ -259,6 +475,84 @@ public final class XlsxWorkbook {
             XmlUtil.skip(p);
         }
         return f;
+    }
+
+    /**
+     * One {@code <border>}: {byte[] styles, int[] colours} per side (and the diagonal), plus the
+     * DIAG_* bits; null when it has no lines.
+     */
+    private static Object[] readBorder(XmlPullParser p, int[] theme) throws XmlPullParserException, IOException {
+        byte[] styles = new byte[5];
+        int[] colors = new int[5];
+        int diagonals = ("1".equals(XmlUtil.attr(p, "diagonalUp")) ? CellStyle.DIAG_UP : 0)
+                | ("1".equals(XmlUtil.attr(p, "diagonalDown")) ? CellStyle.DIAG_DOWN : 0);
+        boolean any = false;
+        int d = p.getDepth();
+        while (XmlUtil.nextChild(p, d)) {
+            int side;
+            switch (p.getName()) {
+                case "left":
+                case "start":
+                    side = CellStyle.LEFT;
+                    break;
+                case "right":
+                case "end":
+                    side = CellStyle.RIGHT;
+                    break;
+                case "top":
+                    side = CellStyle.TOP;
+                    break;
+                case "bottom":
+                    side = CellStyle.BOTTOM;
+                    break;
+                case "diagonal":
+                    side = CellStyle.DIAGONAL;
+                    break;
+                default:
+                    XmlUtil.skip(p);
+                    continue;
+            }
+            byte style = borderStyle(XmlUtil.attr(p, "style"));
+            int d2 = p.getDepth();
+            while (XmlUtil.nextChild(p, d2)) {
+                // As for fonts, 0 means automatic (black).
+                if ("color".equals(p.getName())) colors[side] = color(p, theme, true);
+                XmlUtil.skip(p);
+            }
+            styles[side] = style;
+            if (style != CellStyle.B_NONE && (side != CellStyle.DIAGONAL || diagonals != 0)) any = true;
+        }
+        if (styles[CellStyle.DIAGONAL] == CellStyle.B_NONE) diagonals = 0;
+        return any ? new Object[]{styles, colors, diagonals} : null;
+    }
+
+    static byte borderStyle(String s) {
+        if (s == null) return CellStyle.B_NONE;
+        switch (s) {
+            case "hair":
+                return CellStyle.B_HAIR;
+            case "dotted":
+                return CellStyle.B_DOTTED;
+            case "dashed":
+            case "dashDot":
+            case "dashDotDot":
+                return CellStyle.B_DASHED;
+            case "thin":
+                return CellStyle.B_THIN;
+            case "mediumDashed":
+            case "mediumDashDot":
+            case "mediumDashDotDot":
+            case "slantDashDot":
+                return CellStyle.B_MEDIUM_DASHED;
+            case "medium":
+                return CellStyle.B_MEDIUM;
+            case "double":
+                return CellStyle.B_DOUBLE;
+            case "thick":
+                return CellStyle.B_THICK;
+            default:
+                return CellStyle.B_NONE;
+        }
     }
 
     private static int readFill(XmlPullParser p, int[] theme) throws XmlPullParserException, IOException {
@@ -272,13 +566,20 @@ public final class XlsxWorkbook {
             String type = XmlUtil.attr(p, "patternType");
             boolean visible = type != null && !"none".equals(type) && !"gray125".equals(type);
             int fg = 0, bg = 0;
+            boolean hasFg = false;
             int d2 = p.getDepth();
             while (XmlUtil.nextChild(p, d2)) {
-                if ("fgColor".equals(p.getName())) fg = color(p, theme, false);
-                else if ("bgColor".equals(p.getName())) bg = color(p, theme, false);
+                if ("fgColor".equals(p.getName())) {
+                    fg = color(p, theme, false);
+                    hasFg = true;
+                } else if ("bgColor".equals(p.getName())) {
+                    bg = color(p, theme, false);
+                }
                 XmlUtil.skip(p);
             }
-            if (visible) result = fg != 0 ? fg : bg;
+            // A pattern is drawn in the foreground colour; a white one (0 here) is no fill, and the
+            // background colour (often indexed 64, "system") only counts when there is no foreground.
+            if (visible) result = hasFg ? fg : bg;
         }
         return result;
     }
@@ -371,7 +672,8 @@ public final class XlsxWorkbook {
 
     // ------------------------------------------------------------------- sheet
 
-    private SheetData readSheet(XmlPullParser p, long maxCells) throws XmlPullParserException, IOException {
+    private SheetData readSheet(XmlPullParser p, long maxCells, String sheetPart)
+            throws XmlPullParserException, IOException {
         List<SheetData.Row> rows = new ArrayList<>();
         List<Integer> rowIndex = new ArrayList<>();
         List<float[]> colDefs = new ArrayList<>();
@@ -381,6 +683,10 @@ public final class XlsxWorkbook {
         int maxRow = -1, maxCol = -1;
         long cells = 0;
         boolean truncated = false;
+        boolean showGrid = true, sawView = false;
+        int frozenRows = 0, frozenCols = 0;
+        int[] topLeft = null;
+        List<SheetData.Picture> pictures = new ArrayList<>();
 
         SheetData.Row row = null;
         int rowNum = -1;
@@ -389,6 +695,33 @@ public final class XlsxWorkbook {
         while ((e = p.next()) != XmlPullParser.END_DOCUMENT) {
             if (e != XmlPullParser.START_TAG) continue;
             switch (p.getName()) {
+                case "sheetView":
+                    // Only the first view counts; a workbook can have several windows.
+                    if (!sawView) {
+                        sawView = true;
+                        String g = XmlUtil.attr(p, "showGridLines");
+                        showGrid = !("0".equals(g) || "false".equals(g));
+                        topLeft = parseCell(XmlUtil.attr(p, "topLeftCell"));
+                        int d = p.getDepth();
+                        while (XmlUtil.nextChild(p, d)) {
+                            String state = XmlUtil.attr(p, "state");
+                            if ("pane".equals(p.getName()) && ("frozen".equals(state) || "frozenSplit".equals(state))) {
+                                frozenCols = Math.max(0, XmlUtil.intAttr(p, "xSplit", 0));
+                                frozenRows = Math.max(0, XmlUtil.intAttr(p, "ySplit", 0));
+                                // With frozen panes, the scrolling pane's own first cell.
+                                int[] pane = parseCell(XmlUtil.attr(p, "topLeftCell"));
+                                if (pane != null) topLeft = pane;
+                            }
+                            XmlUtil.skip(p);
+                        }
+                    }
+                    break;
+                case "drawing": {
+                    String id = XmlUtil.attr(p, "id");
+                    ZipParts.Rel rel = id == null ? null : ZipParts.rels(zip, sheetPart, xml).get(id);
+                    if (rel != null && !rel.external) readDrawing(rel.target, pictures);
+                    break;
+                }
                 case "sheetFormatPr": {
                     defaultRowHeight = XmlUtil.floatAttr(p, "defaultRowHeight", 15f);
                     float dcw = XmlUtil.floatAttr(p, "defaultColWidth", -1f);
@@ -407,6 +740,7 @@ public final class XlsxWorkbook {
                     break;
                 }
                 case "row": {
+                    if (row != null) row.trim();
                     rowNum = XmlUtil.intAttr(p, "r", rowNum + 2) - 1;
                     if (rowNum < 0 || rowNum >= MAX_ROWS) {
                         row = null;
@@ -469,6 +803,12 @@ public final class XlsxWorkbook {
             }
         }
 
+        if (row != null) row.trim();
+        // Pictures outside the data still need their rows and columns.
+        for (SheetData.Picture pic : pictures) {
+            maxRow = Math.max(maxRow, Math.min(Math.max(pic.fromRow, pic.toRow), MAX_ROWS - 1));
+            maxCol = Math.max(maxCol, Math.min(Math.max(pic.fromCol, pic.toCol), MAX_COLS - 1));
+        }
         int rowCount = maxRow + 1;
         int colCount = maxCol + 1;
         // Make sure merged areas of the visible part are fully shown.
@@ -500,13 +840,28 @@ public final class XlsxWorkbook {
                 else if (def[4] > 0) widths[c] = def[2];
             }
         }
-        return new SheetData(rowArr, colCount, heights, widths, merges, truncated, styles, date1904);
+        // Rich-text styles added while reading the cells join the table the sheet draws with.
+        if (styleList.size() != styles.length) styles = styleList.toArray(new CellStyle[0]);
+        SheetData data = new SheetData(rowArr, colCount, heights, widths, merges, truncated, styles, date1904);
+        data.showGrid = showGrid;
+        if (topLeft != null) {
+            data.topRow = Math.min(topLeft[0], Math.max(0, rowCount - 1));
+            data.topCol = Math.min(topLeft[1], Math.max(0, colCount - 1));
+        }
+        data.defaultRowHeight = defaultRowHeight;
+        data.defaultColWidth = defaultColWidth;
+        data.pictures.addAll(pictures);
+        // A pane frozen beyond the data would pin the whole sheet.
+        data.frozenRows = Math.min(frozenRows, Math.max(0, rowCount - 1));
+        data.frozenCols = Math.min(frozenCols, Math.max(0, colCount - 1));
+        return data;
     }
 
     private boolean addCell(SheetData.Row row, int col, String type, String value, int style) {
         if (value == null || value.isEmpty()) {
             CellStyle cs = style >= 0 && style < styles.length ? styles[style] : null;
-            if (cs != null && cs.fillColor != 0) {
+            // Empty cells still show their fill and borders.
+            if (cs != null && (cs.fillColor != 0 || cs.borderStyle != null)) {
                 row.add(col, SheetData.EMPTY, null, 0, style);
                 return true;
             }
@@ -532,6 +887,15 @@ public final class XlsxWorkbook {
             case "s": {
                 int i = XmlUtil.parseInt(value.trim(), -1);
                 text = i >= 0 && i < sharedStrings.length ? sharedStrings[i] : "";
+                if (richFonts != null && i >= 0 && i < richFonts.length && richFonts[i] != null) {
+                    long key = ((long) style << 32) | i;
+                    Integer id = richByString.get(key);
+                    if (id == null) {
+                        id = richStyle(style, richFonts[i]);
+                        richByString.put(key, id);
+                    }
+                    style = id;
+                }
                 break;
             }
             case "b":

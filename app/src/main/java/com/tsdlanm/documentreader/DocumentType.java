@@ -4,7 +4,7 @@ import java.util.Locale;
 
 /** Supported formats, detected from the file content rather than its name. */
 public enum DocumentType {
-    PDF, DOCX, XLSX, ZIP, LEGACY_OFFICE, UNKNOWN;
+    PDF, DOCX, XLSX, PPTX, ZIP, LEGACY_OFFICE, UNKNOWN;
 
     public static DocumentType sniff(byte[] head, int len) {
         if (len >= 4 && head[0] == '%' && head[1] == 'P' && head[2] == 'D' && head[3] == 'F') return PDF;
@@ -27,6 +27,9 @@ public enum DocumentType {
         if (n.endsWith(".pdf") || m.equals("application/pdf")) return "PDF";
         if (n.endsWith(".docx") || n.endsWith(".doc") || m.contains("word")) return "Word";
         if (n.endsWith(".xlsx") || n.endsWith(".xls") || m.contains("sheet") || m.contains("excel")) return "Excel";
+        if (n.endsWith(".pptx") || n.endsWith(".ppt") || m.contains("presentation") || m.contains("powerpoint")) {
+            return "PowerPoint";
+        }
         return "";
     }
 }

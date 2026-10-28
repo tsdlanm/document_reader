@@ -1,6 +1,7 @@
 package com.tsdlanm.documentreader.pdf;
 
 import android.animation.ValueAnimator;
+import android.content.ComponentCallbacks2;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
@@ -14,6 +15,8 @@ import android.view.MotionEvent;
 import android.view.ScaleGestureDetector;
 import android.view.View;
 import android.widget.OverScroller;
+
+import com.tsdlanm.documentreader.util.MemoryBudget;
 
 /**
  * Continuous vertical PDF view with pinch/double-tap zoom. Pages are rendered once at screen
@@ -42,6 +45,8 @@ public final class PdfView extends View {
     private final LruCache<Integer, Bitmap> cache;
     private final SparseBooleanArray pending = new SparseBooleanArray();
 
+    /** Low-RAM phone: cache pages as RGB_565, half the memory of what PdfRenderer draws into. */
+    private final boolean compact;
     private PdfEngine engine;
     private float[] tops = new float[0], ws = new float[0], hs = new float[0];
     private float contentH;
@@ -72,9 +77,10 @@ public final class PdfView extends View {
         scroller = new OverScroller(context);
         setBackgroundColor(BACKGROUND);
 
-        // A few screen-wide pages (PdfRenderer needs ARGB_8888, ~6 MB each): enough for the visible
-        // pages and their neighbours. Capped, as a share of the heap alone grew to 128 MB.
-        int maxKb = (int) Math.min(32 * 1024, Runtime.getRuntime().maxMemory() / 1024 / 6);
+        // A few screen-wide pages: enough for the visible pages and their neighbours. Capped, as a
+        // share of the heap alone grew to 128 MB; smaller still on low-RAM phones.
+        compact = MemoryBudget.low(context);
+        int maxKb = MemoryBudget.kb(context, 32 * 1024, 6, 3, compact ? 2 : 4);
         cache = new LruCache<Integer, Bitmap>(maxKb) {
             @Override
             protected int sizeOf(Integer key, Bitmap value) {
@@ -169,6 +175,22 @@ public final class PdfView extends View {
         detailValid = false;
     }
 
+    /** Frees cached pages when the system runs short of memory; they are re-rendered on demand. */
+    public void trimMemory(int level) {
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN) {
+            cache.evictAll();
+            if (!detailBusy) {
+                detailFront = detailBack = null;
+                detailValid = false;
+            }
+        } else if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
+            cache.trimToSize(cache.size() / 2);
+            if (!detailBusy) detailBack = null;
+        }
+        // Not re-rendered here (the app may be in the background): the next frame asks for it.
+        invalidate();
+    }
+
     // ---------------------------------------------------------------- layout
 
     @Override
@@ -258,6 +280,8 @@ public final class PdfView extends View {
         if (last + 1 < tops.length) request(last + 1);
         if (first > 0) request(first - 1);
 
+        // Detail freed by trimMemory: render it again now that the view is drawn.
+        if (zoom > 1.01f && !detailValid && !detailBusy && detailFront == null) scheduleDetail();
         if (detailValid && detailFront != null && zoom > 1.01f && detailZoom == zoom) {
             canvas.drawBitmap(detailFront, detailSx - sx, detailSy - sy, null);
         }
@@ -309,7 +333,7 @@ public final class PdfView extends View {
         }
         final int expectedW = w;
         final PdfEngine e = engine;
-        e.renderPage(i, w, h, wanted, (index, bitmap) -> {
+        e.renderPage(i, w, h, compact, wanted, (index, bitmap) -> {
             pending.delete(index);
             if (bitmap == null) {
                 if (engine == e && index >= wantFirst && index <= wantLast && !e.isClosed()) {

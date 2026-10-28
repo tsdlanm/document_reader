@@ -85,16 +85,24 @@ public final class PdfEngine {
         }
     }
 
-    public void renderPage(final int index, final int w, final int h, final Wanted wanted, final PageCallback cb) {
+    /** {@code compact}: return an RGB_565 copy, half the memory, for low-RAM phones. */
+    public void renderPage(final int index, final int w, final int h, final boolean compact,
+                           final Wanted wanted, final PageCallback cb) {
         handler.post(() -> {
             Bitmap bmp = null;
             if (!closed && wanted.isWanted(index)) {
                 PdfRenderer.Page page = null;
                 try {
+                    // PdfRenderer only draws into ARGB_8888.
                     bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
                     bmp.eraseColor(Color.WHITE);
                     page = renderer.openPage(index);
                     page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY);
+                    if (compact) {
+                        Bitmap small = bmp.copy(Bitmap.Config.RGB_565, false);
+                        bmp.recycle();
+                        bmp = small;
+                    }
                 } catch (OutOfMemoryError | RuntimeException e) {
                     bmp = null;
                 } finally {
