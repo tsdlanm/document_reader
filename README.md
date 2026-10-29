@@ -2,6 +2,17 @@
 
 Aplikasi Android yang sangat ringan untuk **membaca** dokumen. Ukurannya sekitar 150 KB dan bisa dipakai tanpa internet. Aplikasi ini dibuat supaya tetap lancar di HP spesifikasi rendah.
 
+## Cara mengunduh dan memasang
+
+1. Buka halaman rilis: **[github.com/tsdlanm/document_reader/releases/latest](https://github.com/tsdlanm/document_reader/releases/latest)**
+2. Di bagian **Assets**, ketuk file **PembacaDokumen-v1.0.apk** (nama versinya mengikuti rilis terbaru) untuk mengunduhnya.
+3. Buka file yang sudah diunduh, lalu ketuk **Pasang** (*Install*).
+4. Kalau HP menolak dengan pesan *instal dari sumber tidak dikenal*, ketuk **Pengaturan** pada pesan itu dan izinkan untuk browser atau pengelola file yang Anda pakai. Izin ini bisa dicabut lagi setelah selesai.
+
+**Memperbarui:** unduh APK versi terbaru dengan cara yang sama lalu pasang di atas aplikasi yang lama. Daftar file terbaru tidak hilang.
+
+**Catatan:** APK ini ditandatangani dengan kunci pengembangan. Kalau suatu saat rilis berikutnya memakai kunci resmi, aplikasi lama perlu dihapus dulu sebelum memasang versi baru.
+
 ## File yang bisa dibuka
 
 | Jenis | Format |
