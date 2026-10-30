@@ -33,4 +33,7 @@
     <string name="credit">Dibuat oleh tsdlanm · github.com/tsdlanm</string>
     <string name="reading_mode">Mode baca</string>
     <string name="page_mode">Tampilan halaman</string>
+    <string name="link_open">Buka link?</string>
+    <string name="link_open_button">Buka</string>
+    <string name="link_no_app">Tidak ada aplikasi untuk membuka link ini</string>
 </resources>

@@ -28,6 +28,11 @@ public final class PdfView extends View {
         void onPageChanged(int page);
     }
 
+    public interface OnLinkListener {
+        /** A link to an address outside the document was tapped. */
+        void onLink(String uri);
+    }
+
     private static final float MAX_ZOOM = 5f;
     /** Around the pages: the app's light or dark background. */
     private final int BACKGROUND;
@@ -49,6 +54,8 @@ public final class PdfView extends View {
     /** Low-RAM phone: cache pages as RGB_565, half the memory of what PdfRenderer draws into. */
     private final boolean compact;
     private PdfEngine engine;
+    private PdfAnnotations.Link[][] links;
+    private OnLinkListener linkListener;
     /** Bumped when the page layout changes; renders started before are dropped. */
     private int generation;
     private float[] tops = new float[0], ws = new float[0], hs = new float[0];
@@ -134,7 +141,13 @@ public final class PdfView extends View {
 
             @Override
             public boolean onSingleTapConfirmed(MotionEvent e) {
-                performClick();
+                PdfAnnotations.Link link = linkAt(e.getX(), e.getY());
+                if (link != null && linkListener != null) {
+                    if (link.uri != null) linkListener.onLink(link.uri);
+                    else goToPage(link.page);
+                } else {
+                    performClick();
+                }
                 return true;
             }
         });
@@ -164,6 +177,60 @@ public final class PdfView extends View {
         layoutPages();
         invalidate();
         engine.measureRest(this::pageSizesChanged);
+    }
+
+    /**
+     * Switches to another rendering of the same document in which only the {@code changed}
+     * pages look different. Those are rendered again while the old picture stays on screen; the
+     * rest keep theirs. The old engine is closed by its owner.
+     */
+    public void replaceEngine(PdfEngine next, boolean[] changed) {
+        PdfEngine old = engine;
+        if (old == null || next.pageCount != old.pageCount) return;
+        System.arraycopy(old.widths, 0, next.widths, 0, old.pageCount);
+        System.arraycopy(old.heights, 0, next.heights, 0, old.pageCount);
+        engine = next;
+        generation++;
+        pending.clear();
+        if (!old.isMeasured()) next.measureRest(this::pageSizesChanged);
+        for (int i = 0; i < changed.length && i < tops.length; i++) {
+            if (!changed[i] || cache.get(i) == null) continue;
+            if (i >= wantFirst && i <= wantLast) request(i, true);
+            else cache.remove(i);
+        }
+        // Keep showing the sharp detail until the new one is drawn.
+        detailSx = Float.NaN;
+        scheduleDetail();
+        invalidate();
+    }
+
+    public void setLinks(PdfAnnotations.Link[][] links, OnLinkListener listener) {
+        this.links = links;
+        linkListener = listener;
+    }
+
+    /** Whether a point on screen falls on a link, which a tap then follows. */
+    public boolean isLinkAt(float rawX, float rawY) {
+        int[] loc = new int[2];
+        getLocationOnScreen(loc);
+        return linkAt(rawX - loc[0], rawY - loc[1]) != null;
+    }
+
+    private PdfAnnotations.Link linkAt(float x, float y) {
+        if (links == null || tops.length == 0) return null;
+        int page = pageAt((sy + y) / zoom);
+        if (page >= links.length || links[page] == null) return null;
+        pageRect(page, rect);
+        if (!rect.contains(x, y)) return null;
+        // A little slack around small links, as a finger is wider than a line of text.
+        float slackX = 4 * density / rect.width(), slackY = 4 * density / rect.height();
+        float fx = (x - rect.left) / rect.width(), fy = (y - rect.top) / rect.height();
+        for (PdfAnnotations.Link l : links[page]) {
+            if (fx >= l.left - slackX && fx <= l.right + slackX && fy >= l.top - slackY && fy <= l.bottom + slackY) {
+                return l;
+            }
+        }
+        return null;
     }
 
     /** Some page is not the size of the first: lay out again, keeping the page being read in place. */
@@ -357,8 +424,13 @@ public final class PdfView extends View {
         canvas.drawRoundRect(rect, w / 2, w / 2, thumbPaint);
     }
 
-    private void request(final int i) {
-        if (engine == null || pending.get(i) || cache.get(i) != null) return;
+    private void request(int i) {
+        request(i, false);
+    }
+
+    /** {@code again}: render even though a picture is cached, which stays until replaced. */
+    private void request(final int i, boolean again) {
+        if (engine == null || pending.get(i) || (!again && cache.get(i) != null)) return;
         pending.put(i, true);
         int w = Math.max(1, Math.round(ws[i]));
         int h = Math.max(1, Math.round(hs[i]));
@@ -432,7 +504,11 @@ public final class PdfView extends View {
         detailBusy = true;
         e.renderDetail(target, regions, BACKGROUND, () -> {
             detailBusy = false;
-            if (engine != e) return;
+            if (engine != e) {
+                // Engine replaced meanwhile: draw again with the new one.
+                if (engine != null) scheduleDetail();
+                return;
+            }
             if (target.getWidth() != viewW || target.getHeight() != viewH) {
                 // The view was resized while rendering; start over at the new size.
                 scheduleDetail();

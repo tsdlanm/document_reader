@@ -42,6 +42,7 @@ import com.tsdlanm.documentreader.docx.DocxParser;
 import com.tsdlanm.documentreader.docx.FontMatch;
 import com.tsdlanm.documentreader.docx.PageLayout;
 import com.tsdlanm.documentreader.docx.PptxParser;
+import com.tsdlanm.documentreader.pdf.PdfAnnotations;
 import com.tsdlanm.documentreader.pdf.PdfEngine;
 import com.tsdlanm.documentreader.pdf.PdfView;
 import com.tsdlanm.documentreader.util.AndroidXml;
@@ -52,6 +53,7 @@ import com.tsdlanm.documentreader.xlsx.SheetView;
 import com.tsdlanm.documentreader.xlsx.XlsxWorkbook;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -71,6 +73,8 @@ public final class ViewerActivity extends Activity {
         PdfEngine pdf;
         ZipFile zip;
         File temp;
+        /** Copy of a PDF with its annotations drawn in; see {@link PdfAnnotations}. */
+        File flattened;
         DocModel.Document doc;
         /** Print layout of {@link #doc} (laid out after loading); null if it failed or is empty. */
         PageLayout pages;
@@ -288,6 +292,10 @@ public final class ViewerActivity extends Activity {
             //noinspection ResultOfMethodCallIgnored
             r.temp.delete();
         }
+        if (r.flattened != null) {
+            //noinspection ResultOfMethodCallIgnored
+            r.flattened.delete();
+        }
         r.pdf = null;
         r.zip = null;
         r.doc = null;
@@ -312,6 +320,7 @@ public final class ViewerActivity extends Activity {
         switch (r.type) {
             case PDF:
                 showPdf(r.pdf);
+                readAnnotations(r);
                 break;
             case DOCX:
             case PPTX:
@@ -365,6 +374,101 @@ public final class ViewerActivity extends Activity {
         });
         root.addView(pdfView, 0, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT));
+    }
+
+    /**
+     * After the PDF shows: finds its links and, if it has annotations (signature stamps, filled
+     * forms, highlights), switches to a copy with them drawn in.
+     */
+    private void readAnnotations(final Loaded r) {
+        final Context app = getApplicationContext();
+        final Uri source = uri;
+        final int pageCount = r.pdf.pageCount;
+        Tasks.io().execute(() -> {
+            PdfAnnotations.Result res = null;
+            PdfEngine flat = null;
+            File out = null;
+            ParcelFileDescriptor pfd = null;
+            FileInputStream in = null;
+            try {
+                File dir = new File(app.getCacheDir(), "open");
+                if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("No cache dir");
+                out = new File(dir, "flat_" + System.nanoTime());
+                if (r.temp != null) {
+                    in = new FileInputStream(r.temp);
+                } else {
+                    pfd = app.getContentResolver().openFileDescriptor(source, "r");
+                    if (pfd == null) throw new IOException("Cannot open");
+                    in = new FileInputStream(pfd.getFileDescriptor());
+                }
+                res = PdfAnnotations.read(in.getChannel(), pageCount, out);
+                if (res != null && res.flattened != null) {
+                    flat = PdfEngine.open(ParcelFileDescriptor.open(res.flattened, ParcelFileDescriptor.MODE_READ_ONLY));
+                    if (flat.pageCount != pageCount) {
+                        flat.close();
+                        flat = null;
+                    }
+                }
+            } catch (IOException | RuntimeException | OutOfMemoryError e) {
+                // Shown without them, as before.
+            } finally {
+                if (in != null) {
+                    try {
+                        in.close();
+                    } catch (IOException ignored) {
+                    }
+                }
+                if (pfd != null) closeQuietly(pfd);
+            }
+            if (flat == null && out != null) {
+                //noinspection ResultOfMethodCallIgnored
+                out.delete();
+            }
+            final PdfAnnotations.Result result = res;
+            final PdfEngine engine = flat;
+            final File file = out;
+            Tasks.main(() -> {
+                if (destroyed || loaded != r || pdfView == null || r.pdf == null) {
+                    if (engine != null) engine.close();
+                    if (engine != null) {
+                        //noinspection ResultOfMethodCallIgnored
+                        file.delete();
+                    }
+                    return;
+                }
+                if (engine != null) {
+                    PdfEngine old = r.pdf;
+                    r.pdf = engine;
+                    r.flattened = file;
+                    pdfView.replaceEngine(engine, result.changed);
+                    old.close();
+                }
+                if (result != null) pdfView.setLinks(result.links, this::confirmLink);
+            });
+        });
+    }
+
+    /** Asks before leaving for a web address, which shows where the link really goes. */
+    private void confirmLink(String address) {
+        String a = address;
+        if (!a.contains(":")) a = "http://" + a;
+        final Uri target = Uri.parse(a);
+        String scheme = target.getScheme() == null ? "" : target.getScheme().toLowerCase(java.util.Locale.ROOT);
+        if (!scheme.equals("http") && !scheme.equals("https") && !scheme.equals("mailto") && !scheme.equals("tel")) {
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.link_open)
+                .setMessage(a)
+                .setPositiveButton(R.string.link_open_button, (d, w) -> {
+                    try {
+                        startActivity(new Intent(Intent.ACTION_VIEW, target));
+                    } catch (android.content.ActivityNotFoundException e) {
+                        Toast.makeText(this, R.string.link_no_app, Toast.LENGTH_SHORT).show();
+                    }
+                })
+                .setNegativeButton(android.R.string.cancel, null)
+                .show();
     }
 
     private void askPage() {
@@ -753,6 +857,8 @@ public final class ViewerActivity extends Activity {
                         public boolean onSingleTapConfirmed(MotionEvent e) {
                             ActionBar b = getActionBar();
                             if (b == null) return false;
+                            // The PDF view follows the link instead.
+                            if (pdfView != null && pdfView.isLinkAt(e.getRawX(), e.getRawY())) return false;
                             if (b.isShowing()) b.hide();
                             else b.show();
                             return false;

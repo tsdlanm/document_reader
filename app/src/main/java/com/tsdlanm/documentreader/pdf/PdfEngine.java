@@ -56,6 +56,8 @@ public final class PdfEngine {
     private final HandlerThread thread;
     private final Handler handler;
     private volatile boolean closed;
+    /** Whether {@link #measureRest} has finished; main thread only. */
+    private boolean measured;
 
     private PdfEngine(ParcelFileDescriptor pfd, PdfRenderer renderer) {
         this.pfd = pfd;
@@ -82,7 +84,10 @@ public final class PdfEngine {
      * are updated, if some page differs from the assumed size.
      */
     public void measureRest(final Runnable changed) {
-        if (pageCount < 2) return;
+        if (pageCount < 2) {
+            measured = true;
+            return;
+        }
         final float w0 = widths[0], h0 = heights[0];
         final float[] w = new float[pageCount], h = new float[pageCount];
         handler.post(new Runnable() {
@@ -104,9 +109,11 @@ public final class PdfEngine {
                 if (w[next] != w0 || h[next] != h0) differs = true;
                 if (++next < pageCount) {
                     handler.post(this);
-                } else if (differs) {
+                } else {
                     Tasks.main(() -> {
                         if (closed) return;
+                        measured = true;
+                        if (!differs) return;
                         System.arraycopy(w, 1, widths, 1, pageCount - 1);
                         System.arraycopy(h, 1, heights, 1, pageCount - 1);
                         changed.run();
@@ -213,5 +220,9 @@ public final class PdfEngine {
 
     public boolean isClosed() {
         return closed;
+    }
+
+    public boolean isMeasured() {
+        return measured;
     }
 }
