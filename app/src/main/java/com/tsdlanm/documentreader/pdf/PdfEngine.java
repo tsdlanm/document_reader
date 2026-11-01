@@ -1,11 +1,8 @@
 package com.tsdlanm.documentreader.pdf;
 
 import android.graphics.Bitmap;
-import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Matrix;
-import android.graphics.Paint;
-import android.graphics.Rect;
 import android.graphics.pdf.PdfRenderer;
 import android.os.Handler;
 import android.os.HandlerThread;
@@ -31,16 +28,39 @@ public final class PdfEngine {
         boolean isWanted(int index);
     }
 
-    /** Where one page goes in a detail bitmap: its top-left corner and pixels per point. */
-    public static final class Region {
-        final int index;
-        final float left, top, scale;
+    public interface TileWanted {
+        /** Called on the render thread to drop tiles that scrolled away or are of an old zoom. */
+        boolean isWanted(Tile tile);
+    }
 
-        public Region(int index, float left, float top, float scale) {
-            this.index = index;
+    public interface TileCallback {
+        /** Called on the main thread; {@code bitmap} is null when the render was skipped or failed. */
+        void onTile(Tile tile, Bitmap bitmap);
+    }
+
+    /**
+     * A piece of a page at one zoom: {@code w x h} pixels starting at {@code x, y} in the page as
+     * drawn at {@code scale} pixels per point.
+     */
+    public static final class Tile {
+        public final int page;
+        public final long key;
+        public final int x, y, w, h;
+        public final float scale, zoom;
+        /** Where the tile lies in the view's content at {@code zoom}, for the wanted check. */
+        public final float left, top;
+
+        public Tile(int page, long key, int x, int y, int w, int h, float scale, float zoom, float left, float top) {
+            this.page = page;
+            this.key = key;
+            this.x = x;
+            this.y = y;
+            this.w = w;
+            this.h = h;
+            this.scale = scale;
+            this.zoom = zoom;
             this.left = left;
             this.top = top;
-            this.scale = scale;
         }
     }
 
@@ -58,6 +78,12 @@ public final class PdfEngine {
     private volatile boolean closed;
     /** Whether {@link #measureRest} has finished; main thread only. */
     private boolean measured;
+    /**
+     * The last page opened, kept open (render thread only): the tiles of a page come one after
+     * another, and opening a page parses all of it again.
+     */
+    private PdfRenderer.Page openPage;
+    private int openIndex = -1;
 
     private PdfEngine(ParcelFileDescriptor pfd, PdfRenderer renderer) {
         this.pfd = pfd;
@@ -76,6 +102,25 @@ public final class PdfEngine {
         thread = new HandlerThread("pdf", Process.THREAD_PRIORITY_DISPLAY);
         thread.start();
         handler = new Handler(thread.getLooper());
+    }
+
+    /** Render thread: the page, reusing the open one. Only one page may be open at a time. */
+    private PdfRenderer.Page page(int index) {
+        if (openIndex == index) return openPage;
+        closePage();
+        openPage = renderer.openPage(index);
+        openIndex = index;
+        return openPage;
+    }
+
+    private void closePage() {
+        if (openPage == null) return;
+        try {
+            openPage.close();
+        } catch (RuntimeException ignored) {
+        }
+        openPage = null;
+        openIndex = -1;
     }
 
     /**
@@ -98,11 +143,11 @@ public final class PdfEngine {
             public void run() {
                 if (closed) return;
                 try {
-                    PdfRenderer.Page page = renderer.openPage(next);
+                    PdfRenderer.Page page = page(next);
                     w[next] = Math.max(1, page.getWidth());
                     h[next] = Math.max(1, page.getHeight());
-                    page.close();
                 } catch (RuntimeException e) {
+                    closePage();
                     w[next] = w0;
                     h[next] = h0;
                 }
@@ -143,69 +188,58 @@ public final class PdfEngine {
         handler.post(() -> {
             Bitmap bmp = null;
             if (!closed && wanted.isWanted(index)) {
-                PdfRenderer.Page page = null;
-                try {
-                    // PdfRenderer only draws into ARGB_8888.
-                    bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
-                    bmp.eraseColor(Color.WHITE);
-                    page = renderer.openPage(index);
-                    page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY);
-                    if (compact) {
-                        Bitmap small = bmp.copy(Bitmap.Config.RGB_565, false);
-                        bmp.recycle();
-                        bmp = small;
-                    }
-                } catch (OutOfMemoryError | RuntimeException e) {
-                    bmp = null;
-                } finally {
-                    if (page != null) page.close();
-                }
+                bmp = render(index, w, h, null, compact);
             }
             final Bitmap result = bmp;
             Tasks.main(() -> cb.onPage(index, result));
         });
     }
 
-    /** Renders the visible part of several pages at high resolution into {@code target}. */
-    public void renderDetail(final Bitmap target, final Region[] regions, final int background,
-                             final Runnable done) {
+    /** Renders one tile of a zoomed page. {@code compact} as for {@link #renderPage}. */
+    public void renderTile(final Tile tile, final boolean compact, final TileWanted wanted,
+                           final TileCallback cb) {
         handler.post(() -> {
-            if (!closed) {
-                target.eraseColor(background);
-                Canvas canvas = new Canvas(target);
-                Paint white = new Paint();
-                white.setColor(Color.WHITE);
-                Rect bounds = new Rect(0, 0, target.getWidth(), target.getHeight());
+            Bitmap bmp = null;
+            if (!closed && wanted.isWanted(tile)) {
                 Matrix m = new Matrix();
-                Rect clip = new Rect();
-                for (Region r : regions) {
-                    int left = (int) Math.floor(r.left);
-                    int top = (int) Math.floor(r.top);
-                    clip.set(left, top, (int) Math.ceil(r.left + widths[r.index] * r.scale),
-                            (int) Math.ceil(r.top + heights[r.index] * r.scale));
-                    if (!clip.intersect(bounds)) continue;
-                    canvas.drawRect(clip, white);
-                    m.setScale(r.scale, r.scale);
-                    m.postTranslate(r.left, r.top);
-                    PdfRenderer.Page page = null;
-                    try {
-                        page = renderer.openPage(r.index);
-                        page.render(target, clip, m, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY);
-                    } catch (RuntimeException ignored) {
-                        // Leave the page blank rather than crash.
-                    } finally {
-                        if (page != null) page.close();
-                    }
-                }
+                m.setScale(tile.scale, tile.scale);
+                m.postTranslate(-tile.x, -tile.y);
+                bmp = render(tile.page, tile.w, tile.h, m, compact);
             }
-            Tasks.main(done);
+            final Bitmap result = bmp;
+            Tasks.main(() -> cb.onTile(tile, result));
         });
+    }
+
+    /** Render thread: page {@code index} drawn into a new white bitmap, or null on failure. */
+    private Bitmap render(int index, int w, int h, Matrix m, boolean compact) {
+        try {
+            // PdfRenderer only draws into ARGB_8888.
+            Bitmap bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+            bmp.eraseColor(Color.WHITE);
+            try {
+                page(index).render(bmp, null, m, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY);
+            } catch (RuntimeException e) {
+                closePage();
+                bmp.recycle();
+                return null;
+            }
+            if (compact) {
+                Bitmap small = bmp.copy(Bitmap.Config.RGB_565, false);
+                bmp.recycle();
+                bmp = small;
+            }
+            return bmp;
+        } catch (OutOfMemoryError e) {
+            return null;
+        }
     }
 
     public void close() {
         if (closed) return;
         closed = true;
         handler.post(() -> {
+            closePage();
             try {
                 renderer.close();
             } catch (RuntimeException ignored) {

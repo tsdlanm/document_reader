@@ -18,10 +18,13 @@ import android.widget.OverScroller;
 
 import com.tsdlanm.documentreader.util.MemoryBudget;
 
+import java.util.HashSet;
+
 /**
  * Continuous vertical PDF view with pinch/double-tap zoom. Pages are rendered once at screen
- * width and kept in a small memory-bounded cache; when zoomed in, only the visible area is
- * re-rendered sharply after the gesture stops.
+ * width and kept in a small memory-bounded cache; when zoomed in, the visible area is rendered
+ * sharply in tiles as soon as the zoom settles, also while scrolling, and kept so that panning
+ * only renders the tiles that come into view.
  */
 public final class PdfView extends View {
     public interface OnPageChangeListener {
@@ -38,6 +41,11 @@ public final class PdfView extends View {
     private final int BACKGROUND;
     /** Upper bound for one cached page bitmap, in pixels. */
     private static final int MAX_PAGE_PIXELS = 2048 * 2048;
+    /**
+     * Side of a zoom tile in pixels: small enough that a short pan renders little, large enough
+     * that a screen takes few renders, each of which walks the whole page.
+     */
+    private static final int TILE = 384;
 
     private final float density;
     private final float gap;
@@ -82,13 +90,23 @@ public final class PdfView extends View {
     private OnPageChangeListener listener;
     private ValueAnimator zoomAnimator;
 
-    private Bitmap detailFront, detailBack;
-    private float detailZoom, detailSx, detailSy;
-    private boolean detailValid, detailBusy, detailDirty;
-
-    private final Runnable detailRunnable = this::requestDetail;
+    /**
+     * Tiles of the settled zoom {@code tileZoom}, and those of the zoom before, drawn scaled
+     * where the new ones are not rendered yet. Both empty when not zoomed in.
+     */
+    private LruCache<Long, Bitmap> tiles, oldTiles;
+    private float tileZoom, oldZoom;
+    private final HashSet<Long> pendingTiles = new HashSet<>();
+    /** Tiles of pages drawn differently by a replacing engine: shown until rendered again. */
+    private final HashSet<Long> staleTiles = new HashSet<>();
+    /** For the render thread: the zoom wanted and the visible content area at that zoom. */
+    private volatile float wantZoom, wantLeft, wantTop, wantRight, wantBottom;
 
     private final PdfEngine.Wanted wanted = index -> index >= wantFirst && index <= wantLast;
+
+    private final PdfEngine.TileWanted tileWanted = t -> t.zoom == wantZoom
+            && t.left < wantRight && t.left + t.w > wantLeft
+            && t.top < wantBottom && t.top + t.h > wantTop;
 
     public PdfView(Context context) {
         super(context);
@@ -110,6 +128,8 @@ public final class PdfView extends View {
                 return Math.max(1, value.getByteCount() / 1024);
             }
         };
+        tiles = newTileCache();
+        oldTiles = newTileCache();
 
         gestures = new GestureDetector(context, new GestureDetector.SimpleOnGestureListener() {
             @Override
@@ -167,9 +187,19 @@ public final class PdfView extends View {
             @Override
             public void onScaleEnd(ScaleGestureDetector d) {
                 scaling = false;
-                scheduleDetail();
+                invalidate();
             }
         });
+    }
+
+    /** Sized in {@link #onSizeChanged}, once the screen area to cover is known. */
+    private LruCache<Long, Bitmap> newTileCache() {
+        return new LruCache<Long, Bitmap>(1024) {
+            @Override
+            protected int sizeOf(Long key, Bitmap value) {
+                return Math.max(1, value.getByteCount() / 1024);
+            }
+        };
     }
 
     public void setEngine(PdfEngine engine) {
@@ -192,15 +222,19 @@ public final class PdfView extends View {
         engine = next;
         generation++;
         pending.clear();
+        pendingTiles.clear();
         if (!old.isMeasured()) next.measureRest(this::pageSizesChanged);
         for (int i = 0; i < changed.length && i < tops.length; i++) {
             if (!changed[i] || cache.get(i) == null) continue;
             if (i >= wantFirst && i <= wantLast) request(i, true);
             else cache.remove(i);
         }
-        // Keep showing the sharp detail until the new one is drawn.
-        detailSx = Float.NaN;
-        scheduleDetail();
+        // Keep showing the sharp tiles of the changed pages until the new ones are drawn.
+        for (Long key : tiles.snapshot().keySet()) {
+            int page = (int) (key >>> 40);
+            if (page < changed.length && changed[page]) staleTiles.add(key);
+        }
+        oldTiles.evictAll();
         invalidate();
     }
 
@@ -241,12 +275,11 @@ public final class PdfView extends View {
         generation++;
         cache.evictAll();
         pending.clear();
-        detailValid = false;
+        dropTiles();
         layoutPages();
         if (page < tops.length) sy = (tops[page] + within * hs[page]) * zoom - viewH / 2f;
         clampScroll();
         invalidate();
-        scheduleDetail();
     }
 
     public void setOnPageChangeListener(OnPageChangeListener l) {
@@ -263,32 +296,36 @@ public final class PdfView extends View {
         sy = (tops[index] - gap) * zoom - topInset;
         clampScroll();
         invalidate();
-        scheduleDetail();
     }
 
     /** Stops rendering and frees memory. The engine is closed by its owner. */
     public void release() {
-        removeCallbacks(detailRunnable);
         engine = null;
         cache.evictAll();
-        detailFront = detailBack = null;
-        detailValid = false;
+        dropTiles();
     }
 
     /** Frees cached pages when the system runs short of memory; they are re-rendered on demand. */
     public void trimMemory(int level) {
         if (level >= ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN) {
             cache.evictAll();
-            if (!detailBusy) {
-                detailFront = detailBack = null;
-                detailValid = false;
-            }
+            dropTiles();
         } else if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
             cache.trimToSize(cache.size() / 2);
-            if (!detailBusy) detailBack = null;
+            oldTiles.evictAll();
+            tiles.trimToSize(tiles.size() / 2);
         }
         // Not re-rendered here (the app may be in the background): the next frame asks for it.
         invalidate();
+    }
+
+    /** Forgets all tiles; the next frame starts a new set if zoomed in. */
+    private void dropTiles() {
+        tiles.evictAll();
+        oldTiles.evictAll();
+        pendingTiles.clear();
+        staleTiles.clear();
+        tileZoom = 0;
     }
 
     // ---------------------------------------------------------------- layout
@@ -302,15 +339,19 @@ public final class PdfView extends View {
         if (widthChanged) {
             cache.evictAll();
             pending.clear();
+            dropTiles();
             layoutPages();
         }
-        detailValid = false;
-        detailFront = detailBack = null;
+        // Room for the tiles that can show at once (a screen, plus the part tiles cut at its
+        // edges) and half again, so that panning back and forth keeps them.
+        long visible = (long) (w / TILE + 2) * (h / TILE + 2);
+        int tileKb = (int) (visible * 3 / 2 * TILE * TILE * (compact ? 2 : 4) / 1024);
+        tiles.resize(Math.max(1024, tileKb));
+        oldTiles.resize(Math.max(1024, tileKb));
         // Rotation keeps the middle in view; a toolbar hiding or showing (same width) keeps the
         // scroll, so the page moves with the toolbar instead of jumping.
         if (contentH > 0 && widthChanged) sy = anchor * contentH * zoom - h / 2f;
         clampScroll();
-        scheduleDetail();
     }
 
     private void layoutPages() {
@@ -383,11 +424,7 @@ public final class PdfView extends View {
         if (last + 1 < tops.length) request(last + 1);
         if (first > 0) request(first - 1);
 
-        // Detail freed by trimMemory: render it again now that the view is drawn.
-        if (zoom > 1.01f && !detailValid && !detailBusy && detailFront == null) scheduleDetail();
-        if (detailValid && detailFront != null && zoom > 1.01f && detailZoom == zoom) {
-            canvas.drawBitmap(detailFront, detailSx - sx, detailSy - sy, null);
-        }
+        drawTiles(canvas, first, last);
         drawThumb(canvas);
 
         int page = pageAt((sy + viewH / 2f) / zoom);
@@ -401,6 +438,116 @@ public final class PdfView extends View {
         float left = (viewW - ws[i]) / 2f * zoom - sx;
         float top = tops[i] * zoom - sy;
         out.set(left, top, left + ws[i] * zoom, top + hs[i] * zoom);
+    }
+
+    // ------------------------------------------------------------ zoom tiles
+
+    private void drawTiles(Canvas canvas, int first, int last) {
+        if (zoom <= 1.01f) {
+            // The screen-wide pages are sharp: free the tiles.
+            if (tileZoom != 0) dropTiles();
+            return;
+        }
+        boolean settled = !scaling && (zoomAnimator == null || !zoomAnimator.isRunning());
+        if (settled && zoom != tileZoom) {
+            // A new zoom: keep the current tiles, scaled, until the new ones cover the screen.
+            LruCache<Long, Bitmap> t = oldTiles;
+            t.evictAll();
+            if (tileZoom != 0) {
+                oldTiles = tiles;
+                oldZoom = tileZoom;
+                tiles = t;
+            }
+            pendingTiles.clear();
+            staleTiles.clear();
+            tileZoom = zoom;
+        }
+        if (tileZoom == 0) return;
+        if (zoom == tileZoom) {
+            float margin = TILE / 2f;
+            wantLeft = sx - margin;
+            wantTop = sy - margin;
+            wantRight = sx + viewW + margin;
+            wantBottom = sy + viewH + margin;
+            wantZoom = zoom;
+        } else {
+            wantZoom = 0;
+        }
+        int missing = 0;
+        for (int i = first; i <= last; i++) missing += tileLayer(canvas, i, tiles, tileZoom, false);
+        if (missing > 0 && oldTiles.size() > 0) {
+            for (int i = first; i <= last; i++) tileLayer(canvas, i, oldTiles, oldZoom, true);
+        } else if (missing == 0 && zoom == tileZoom) {
+            oldTiles.evictAll();
+        }
+        for (int i = first; i <= last; i++) tileLayer(canvas, i, tiles, tileZoom, true);
+    }
+
+    /**
+     * The visible tiles of page {@code i} rendered at zoom {@code z}: drawn (scaled when the view
+     * is at another zoom), or else counted and, at the current zoom, requested. Returns the
+     * number missing.
+     */
+    private int tileLayer(Canvas canvas, int i, LruCache<Long, Bitmap> layer, float z, boolean draw) {
+        float f = zoom / z;
+        int pw = Math.round(ws[i] * z), ph = Math.round(hs[i] * z);
+        float left = (viewW - ws[i]) / 2f * zoom - sx;
+        float top = tops[i] * zoom - sy;
+        if (f == 1f) {
+            // Whole pixels, so that the tiles meet without seams and draw unscaled.
+            left = Math.round(left);
+            top = Math.round(top);
+        }
+        float step = TILE * f;
+        int c0 = Math.max(0, (int) Math.floor(-left / step));
+        int c1 = Math.min((pw - 1) / TILE, (int) Math.floor((viewW - left) / step));
+        int r0 = Math.max(0, (int) Math.floor(-top / step));
+        int r1 = Math.min((ph - 1) / TILE, (int) Math.floor((viewH - top) / step));
+        int missing = 0;
+        for (int r = r0; r <= r1; r++) {
+            for (int c = c0; c <= c1; c++) {
+                long key = ((long) i << 40) | ((long) r << 20) | c;
+                Bitmap b = layer.get(key);
+                if (draw) {
+                    if (b == null) continue;
+                    if (f == 1f) {
+                        canvas.drawBitmap(b, left + c * TILE, top + r * TILE, null);
+                    } else {
+                        float x = left + c * step, y = top + r * step;
+                        rect.set(x, y, x + b.getWidth() * f, y + b.getHeight() * f);
+                        canvas.drawBitmap(b, null, rect, bitmapPaint);
+                    }
+                } else if (b == null) {
+                    missing++;
+                    if (f == 1f) requestTile(i, r, c, key, pw, ph);
+                } else if (f == 1f && staleTiles.contains(key)) {
+                    requestTile(i, r, c, key, pw, ph);
+                }
+            }
+        }
+        return missing;
+    }
+
+    private void requestTile(int i, int r, int c, long key, int pw, int ph) {
+        if (engine == null || !pendingTiles.add(key)) return;
+        int x = c * TILE, y = r * TILE;
+        float z = tileZoom;
+        PdfEngine.Tile t = new PdfEngine.Tile(i, key, x, y, Math.min(TILE, pw - x), Math.min(TILE, ph - y),
+                pw / engine.widths[i], z, (viewW - ws[i]) / 2f * z + x, tops[i] * z + y);
+        final PdfEngine e = engine;
+        final int gen = generation;
+        e.renderTile(t, compact, tileWanted, (tile, bitmap) -> {
+            if (gen != generation || engine != e || tile.zoom != tileZoom) return;
+            pendingTiles.remove(tile.key);
+            if (bitmap == null) {
+                // Out of memory, most likely: free space, the next draw retries.
+                if (tileWanted.isWanted(tile) && !e.isClosed()) tiles.trimToSize(tiles.size() / 2);
+                return;
+            }
+            tiles.put(tile.key, bitmap);
+            staleTiles.remove(tile.key);
+            invalidate();
+        });
     }
 
     private boolean thumbVisible() {
@@ -458,76 +605,6 @@ public final class PdfView extends View {
         });
     }
 
-    // ------------------------------------------------------- sharp zoom detail
-
-    private void scheduleDetail() {
-        removeCallbacks(detailRunnable);
-        if (engine == null) return;
-        if (zoom > 1.01f) {
-            postDelayed(detailRunnable, 150);
-        } else if (!detailBusy) {
-            // Not zoomed: free the two screen-sized buffers.
-            detailFront = detailBack = null;
-            detailValid = false;
-        }
-    }
-
-    private void requestDetail() {
-        if (engine == null || viewW == 0 || viewH == 0 || zoom <= 1.01f) return;
-        if (scaling || flinging || draggingThumb) {
-            scheduleDetail();
-            return;
-        }
-        if (detailBusy) {
-            detailDirty = true;
-            return;
-        }
-        if (detailValid && detailZoom == zoom && detailSx == sx && detailSy == sy) return;
-        if (detailBack == null || detailBack.getWidth() != viewW || detailBack.getHeight() != viewH) {
-            try {
-                detailBack = Bitmap.createBitmap(viewW, viewH, Bitmap.Config.ARGB_8888);
-            } catch (OutOfMemoryError oom) {
-                detailBack = null;
-                return;
-            }
-        }
-        int first = pageAt(sy / zoom);
-        int last = pageAt((sy + viewH) / zoom);
-        PdfEngine.Region[] regions = new PdfEngine.Region[last - first + 1];
-        for (int i = first; i <= last; i++) {
-            pageRect(i, rect);
-            regions[i - first] = new PdfEngine.Region(i, rect.left, rect.top, ws[i] / engine.widths[i] * zoom);
-        }
-        final float z = zoom, x = sx, y = sy;
-        final Bitmap target = detailBack;
-        final PdfEngine e = engine;
-        detailBusy = true;
-        e.renderDetail(target, regions, BACKGROUND, () -> {
-            detailBusy = false;
-            if (engine != e) {
-                // Engine replaced meanwhile: draw again with the new one.
-                if (engine != null) scheduleDetail();
-                return;
-            }
-            if (target.getWidth() != viewW || target.getHeight() != viewH) {
-                // The view was resized while rendering; start over at the new size.
-                scheduleDetail();
-                return;
-            }
-            detailBack = detailFront;
-            detailFront = target;
-            detailZoom = z;
-            detailSx = x;
-            detailSy = y;
-            detailValid = true;
-            invalidate();
-            if (detailDirty || zoom != z || sx != x || sy != y) {
-                detailDirty = false;
-                scheduleDetail();
-            }
-        });
-    }
-
     // ------------------------------------------------------------- gestures
 
     private void scrollByPx(float dx, float dy) {
@@ -556,7 +633,7 @@ public final class PdfView extends View {
         zoomAnimator.addListener(new android.animation.AnimatorListenerAdapter() {
             @Override
             public void onAnimationEnd(android.animation.Animator animation) {
-                scheduleDetail();
+                invalidate();
             }
         });
         zoomAnimator.start();
@@ -588,15 +665,11 @@ public final class PdfView extends View {
             } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
                 draggingThumb = false;
                 invalidate();
-                scheduleDetail();
             }
             return true;
         }
         scaleGestures.onTouchEvent(e);
         gestures.onTouchEvent(e);
-        if ((action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) && !flinging) {
-            scheduleDetail();
-        }
         return true;
     }
 
@@ -614,7 +687,6 @@ public final class PdfView extends View {
             postInvalidateOnAnimation();
         } else if (flinging) {
             flinging = false;
-            scheduleDetail();
         }
     }
 
@@ -622,6 +694,5 @@ public final class PdfView extends View {
     protected void onDetachedFromWindow() {
         super.onDetachedFromWindow();
         if (zoomAnimator != null) zoomAnimator.cancel();
-        removeCallbacks(detailRunnable);
     }
 }

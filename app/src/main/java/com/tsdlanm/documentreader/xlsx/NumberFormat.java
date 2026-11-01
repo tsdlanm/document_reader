@@ -136,7 +136,8 @@ final class NumberFormat {
         return kind == DATE || kind == TIME || kind == DATETIME;
     }
 
-    String format(double v, boolean date1904) {
+    /** Synchronized: the sheet's tiles are drawn on a background thread, taps read cells on the main one. */
+    synchronized String format(double v, boolean date1904) {
         if (Double.isNaN(v) || Double.isInfinite(v)) return "#NUM!";
         switch (kind) {
             case FIXED:

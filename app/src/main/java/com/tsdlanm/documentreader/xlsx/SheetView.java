@@ -7,13 +7,12 @@ import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
-import android.graphics.DashPathEffect;
 import android.graphics.Paint;
 import android.graphics.RectF;
 import android.os.Build;
-import android.text.Layout;
-import android.text.StaticLayout;
-import android.text.TextPaint;
+import android.os.Handler;
+import android.os.HandlerThread;
+import android.os.Process;
 import android.util.LruCache;
 import android.view.GestureDetector;
 import android.view.HapticFeedbackConstants;
@@ -29,9 +28,7 @@ import com.tsdlanm.documentreader.util.MemoryBudget;
 import com.tsdlanm.documentreader.util.Tasks;
 import com.tsdlanm.documentreader.util.ZipImages;
 
-import java.util.ArrayList;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Set;
 import java.util.zip.ZipFile;
 
@@ -44,39 +41,23 @@ public final class SheetView extends View {
         void onCellSelected(int row, int col, String text);
     }
 
-    /** Excel sizes are in 96-dpi pixels / points; this scales them to dp, as large as Mi Doc Viewer shows them. */
-    private static final float SIZE_FACTOR = 0.88f;
+    private static final float SIZE_FACTOR = CellPainter.SIZE_FACTOR;
     private static final float MIN_ZOOM = 0.35f, MAX_ZOOM = 4f;
-    private static final int GRID = 0xFFDCDCDC, SELECT = 0xFF1A73E8, SELECT_FILL = 0x221A73E8;
+    private static final int SELECT = 0xFF1A73E8, SELECT_FILL = 0x221A73E8;
     /** Row and column headers follow the app's light or dark colours; the cells stay paper. */
     private final int HEADER_BG, HEADER_LINE, HEADER_TEXT, HEADER_SELECTED;
-    private static final int FILTER_BG = 0xFFF8F9FA, FILTER_ACTIVE_BG = 0xFFE8F0FE;
     private static final int FREEZE_LINE = 0xFF9E9E9E, PLACEHOLDER = 0xFFEEEEEE;
     private static final float EMU_PER_PX = 9525f;
-    private static final long MAX_COLS_KEY = 16384;
-    /** How many columns text spilling left is followed across (also how far right the pane looks for it). */
-    private static final int MAX_SPILL = 16;
 
 
     private final float density;
     private final Paint fill = new Paint();
     private final Paint line = new Paint();
-    private final Paint text = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
     private final Paint headerText = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint border = new Paint();
-    /** Paints over gridlines (see {@link #hideGridUnder}). */
-    private final Paint cover = new Paint();
     private final Paint bitmapPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
-    private final DashPathEffect dotted, dashed;
     private final RectF rect = new RectF();
-    /** Wrapped cell text, laid out at zoom 1; keyed by row and column. */
-    private final LruCache<Long, StaticLayout> wrapped = new LruCache<>(300);
-    /**
-     * Width scale per cell style and text: measuring is too slow to repeat every frame. Looked up
-     * with the objects at hand, so drawing a frame allocates nothing; cleared when it grows large.
-     */
-    private final java.util.HashMap<CellStyle, java.util.HashMap<String, Float>> widthScales = new java.util.HashMap<>();
-    private int widthScaleCount;
+    /** Cells drawn on the main thread (while pinching, and the gridlines under missing tiles). */
+    private final CellPainter painter;
     private final LruCache<String, Bitmap> images;
     private final Set<String> loading = new HashSet<>(), failed = new HashSet<>();
     private ZipFile zip;
@@ -87,7 +68,10 @@ public final class SheetView extends View {
     private final ScaleGestureDetector scaleGestures;
 
     private SheetData data;
-    /** Prefix sums of column widths / row heights at zoom 1, in px; length count + 1. */
+    /**
+     * Prefix sums of column widths / row heights at zoom 1, in px; length count + 1. Tiles drawn
+     * in the background read them, so they are replaced, never changed in place.
+     */
     private float[] colX = new float[1], rowY = new float[1];
     private float headerW, headerH;
     private float baseTextPx;
@@ -95,13 +79,6 @@ public final class SheetView extends View {
     private boolean scaling, flinging;
     private int selRow = -1, selCol = -1;
     private OnCellSelectedListener listener;
-    private final ArrayList<int[]> visibleMerges = new ArrayList<>();
-    /**
-     * For the pane being drawn: which visible merge (index + 1, 0 for none) covers each cell of
-     * rows gridR0.. and columns gridC0.., so per-cell lookups need no scan. Reused between frames.
-     */
-    private int[] mergeGrid = new int[0];
-    private int gridR0, gridC0, gridRows, gridCols;
 
     public SheetView(Context context) {
         super(context);
@@ -113,17 +90,9 @@ public final class SheetView extends View {
         setBackgroundColor(Color.WHITE);
         // One screen pixel, like Excel's gridlines: thicker ones crowd out the text.
         line.setStrokeWidth(1f);
-        border.setStyle(Paint.Style.STROKE);
-        cover.setStrokeWidth(2f);
-        dotted = new DashPathEffect(new float[]{density, density * 1.5f}, 0);
-        dashed = new DashPathEffect(new float[]{density * 3, density * 2}, 0);
-        int tilesKb = MemoryBudget.kb(context, 12 * 1024, 8, 2.5f, 2);
-        tiles = new LruCache<Long, Bitmap>(tilesKb) {
-            @Override
-            protected int sizeOf(Long key, Bitmap value) {
-                return Math.max(1, value.getByteCount() / 1024);
-            }
-        };
+        int tilesKb = MemoryBudget.kb(context, 16 * 1024, 8, 3f, 2);
+        tiles = newTileCache(tilesKb);
+        oldTiles = newTileCache(tilesKb);
         int imagesKb = MemoryBudget.kb(context, 16 * 1024, 8, 0, 2);
         images = new LruCache<String, Bitmap>(imagesKb) {
             @Override
@@ -135,6 +104,8 @@ public final class SheetView extends View {
         headerText.setTextAlign(Paint.Align.CENTER);
         scroller = new OverScroller(context);
         baseTextPx = 11f * 1.333f * SIZE_FACTOR * density;
+        painter = new CellPainter(density, baseTextPx, HEADER_LINE, HEADER_TEXT);
+        tilePainter = new CellPainter(density, baseTextPx, HEADER_LINE, HEADER_TEXT);
 
         gestures = new GestureDetector(context, new GestureDetector.SimpleOnGestureListener() {
             @Override
@@ -214,9 +185,7 @@ public final class SheetView extends View {
 
     /** A downloaded font arrived: re-measure and redraw the text in it. */
     private final Runnable fontsChanged = () -> {
-        widthScales.clear();
-        widthScaleCount = 0;
-        wrapped.evictAll();
+        resetPainters();
         dropTiles();
         invalidate();
     };
@@ -230,6 +199,8 @@ public final class SheetView extends View {
     @Override
     protected void onDetachedFromWindow() {
         FontMatch.removeListener(fontsChanged);
+        // Tiles still queued are dropped.
+        dropTiles();
         super.onDetachedFromWindow();
     }
 
@@ -240,10 +211,7 @@ public final class SheetView extends View {
 
     public void setData(SheetData d) {
         data = d;
-        wrapped.evictAll();
         dropTiles();
-        widthScales.clear();
-        widthScaleCount = 0;
         images.evictAll();
         failed.clear();
         frozenRows = d == null ? 0 : d.frozenRows;
@@ -304,19 +272,8 @@ public final class SheetView extends View {
         sy = Math.max(0, Math.min(sy, maxY()));
     }
 
-    /** Index i such that edges[i] <= v < edges[i+1], clamped to valid cells. */
     private static int find(float[] edges, float v) {
-        int lo = 0, hi = edges.length - 2, ans = 0;
-        while (lo <= hi) {
-            int mid = (lo + hi) >>> 1;
-            if (edges[mid] <= v) {
-                ans = mid;
-                lo = mid + 1;
-            } else {
-                hi = mid - 1;
-            }
-        }
-        return ans;
+        return CellPainter.find(edges, v);
     }
 
     /** Horizontal and vertical scroll of the region being drawn: 0 inside frozen panes. */
@@ -369,7 +326,7 @@ public final class SheetView extends View {
         int c = find(colX, cx), r = find(rowY, cy);
         int[] f = data.filterRange;
         if (f != null && filterListener != null && r == f[0] && c >= f[1] && c <= f[3]
-                && cx >= colX[c + 1] - filterButtonSize(r) - 6 * density) {
+                && cx >= colX[c + 1] - CellPainter.filterButtonSize(rowY, r, density) - 6 * density) {
             filterListener.onFilter(c);
             return;
         }
@@ -388,10 +345,8 @@ public final class SheetView extends View {
     public void trimMemory(int level) {
         if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
             images.evictAll();
-            wrapped.evictAll();
-        dropTiles();
-            widthScales.clear();
-            widthScaleCount = 0;
+            resetPainters();
+            dropTiles();
             invalidate();
         }
     }
@@ -416,14 +371,7 @@ public final class SheetView extends View {
     }
 
     private int[] mergeAt(int r, int c) {
-        return mergeAt(data.merges, r, c);
-    }
-
-    private static int[] mergeAt(List<int[]> merges, int r, int c) {
-        for (int[] m : merges) {
-            if (r >= m[0] && r <= m[2] && c >= m[1] && c <= m[3]) return m;
-        }
-        return null;
+        return CellPainter.mergeAt(data.merges, r, c);
     }
 
     // -------------------------------------------------------------- drawing
@@ -458,23 +406,19 @@ public final class SheetView extends View {
         float fx = Math.min(w, frozenRight()), fy = Math.min(h, frozenBottom());
         int lastRow = rowY.length - 2, lastCol = colX.length - 2;
 
+        // Pinching changes the zoom every frame: the tiles drawn so far are shown scaled, and
+        // tiles at the new zoom are drawn once the fingers lift.
+        if (!scaling && zoom != tileZoom) startTileZoom();
+        painter.set(data, colX, rowY, headerW, headerH, zoom);
+        wantCount = 0;
         // The scrolling part first, then the frozen panes over it.
-        if (scaling) {
-            // Pinching: the zoom changes every frame, so the cells are drawn directly.
-            drawPane(canvas, sx, sy, fx, fy, w, h, frozenRows, lastRow, frozenCols, lastCol);
-            if (frozenCols > 0) drawPane(canvas, 0, sy, hx, fy, fx, h, frozenRows, lastRow, 0, frozenCols - 1);
-            if (frozenRows > 0) drawPane(canvas, sx, 0, fx, hy, w, fy, 0, frozenRows - 1, frozenCols, lastCol);
-            if (frozenRows > 0 && frozenCols > 0) drawPane(canvas, 0, 0, hx, hy, fx, fy, 0, frozenRows - 1, 0, frozenCols - 1);
-        } else {
-            if (zoom != tileZoom) {
-                tiles.evictAll();
-                tileZoom = zoom;
-            }
-            blitPane(canvas, sx, sy, fx, fy, w, h);
-            if (frozenCols > 0) blitPane(canvas, 0, sy, hx, fy, fx, h);
-            if (frozenRows > 0) blitPane(canvas, sx, 0, fx, hy, w, fy);
-            if (frozenRows > 0 && frozenCols > 0) blitPane(canvas, 0, 0, hx, hy, fx, fy);
-        }
+        pane(canvas, sx, sy, fx, fy, w, h, frozenRows, lastRow, frozenCols, lastCol, true);
+        if (frozenCols > 0) pane(canvas, 0, sy, hx, fy, fx, h, frozenRows, lastRow, 0, frozenCols - 1, false);
+        if (frozenRows > 0) pane(canvas, sx, 0, fx, hy, w, fy, 0, frozenRows - 1, frozenCols, lastCol, false);
+        if (frozenRows > 0 && frozenCols > 0) pane(canvas, 0, 0, hx, hy, fx, fy, 0, frozenRows - 1, 0, frozenCols - 1, false);
+        wantAreas = java.util.Arrays.copyOf(wantBuf, wantCount);
+        lastSx = sx;
+        lastSy = sy;
 
         drawPictures(canvas, w, h);
         drawSelection(canvas, w, h);
@@ -488,159 +432,242 @@ public final class SheetView extends View {
     // ---------------------------------------------------------------- tiles
 
     /**
-     * The cells are drawn once into tiles at the current zoom; scrolling then only moves bitmaps,
-     * as in the Word page view, instead of drawing every visible cell each frame. Selection,
-     * pictures and headers are drawn over them directly. Tiles cover the sheet in zoomed pixels
-     * from cell A1, so the frozen panes reuse the same tiles.
+     * The cells are drawn into tiles at the current zoom on a background thread, and the frames
+     * only place those bitmaps, as in the Word page view: drawing the cells takes far longer than
+     * a frame on a low-end phone. Where a tile is not ready yet the gridlines show, or the tiles of
+     * the previous zoom, scaled. Selection, pictures and headers are drawn over them directly.
+     * Tiles cover the sheet in zoomed pixels from cell A1, so the frozen panes reuse the same tiles.
      */
-    private static final int TILE = 512;
-    private final LruCache<Long, Bitmap> tiles;
-    private float tileZoom = -1;
+    private static final int TILE = 384;
+    private static Handler tileHandler;
+    private LruCache<Long, Bitmap> tiles, oldTiles;
+    private float tileZoom = -1, oldZoom;
+    private final HashSet<Long> pendingTiles = new HashSet<>();
+    /** Bumped when the tiles in progress no longer fit: another zoom, sheet, font or row layout. */
+    private int tileGen;
+    /** Tile thread only. */
+    private final CellPainter tilePainter;
     private final Canvas tileCanvas = new Canvas();
+    /**
+     * For the tile thread: the current generation, and the parts of the sheet the panes show
+     * (left, top, right, bottom in zoomed pixels, a tile wider each way), so tiles that scrolled
+     * away are skipped.
+     */
+    private volatile int wantGen;
+    private volatile float[] wantAreas = new float[0];
+    private final float[] wantBuf = new float[16];
+    private int wantCount;
+    /** Scroll at the last frame, for the direction to draw tiles ahead in. */
+    private float lastSx, lastSy;
+
+    private static synchronized Handler tileHandler() {
+        if (tileHandler == null) {
+            HandlerThread t = new HandlerThread("sheet", Process.THREAD_PRIORITY_DEFAULT);
+            t.start();
+            tileHandler = new Handler(t.getLooper());
+        }
+        return tileHandler;
+    }
+
+    private static LruCache<Long, Bitmap> newTileCache(int kb) {
+        return new LruCache<Long, Bitmap>(kb) {
+            @Override
+            protected int sizeOf(Long key, Bitmap value) {
+                return Math.max(1, value.getByteCount() / 1024);
+            }
+        };
+    }
 
     /** Cell contents or sizes changed: the tiles are drawn again. */
     private void dropTiles() {
         tiles.evictAll();
+        oldTiles.evictAll();
+        pendingTiles.clear();
+        tileZoom = -1;
+        wantGen = ++tileGen;
     }
 
-    /** Draws a pane from tiles: content scrolled by psx/psy into the screen box. */
-    private void blitPane(Canvas canvas, float psx, float psy, float left, float top, float right, float bottom) {
+    /** Fonts or memory changed: both painters measure their text again. */
+    private void resetPainters() {
+        painter.reset();
+        tileHandler().post(tilePainter::reset);
+    }
+
+    /** Settled at a new zoom: the current tiles become the stand-ins until the new ones are drawn. */
+    private void startTileZoom() {
+        LruCache<Long, Bitmap> spare = oldTiles;
+        spare.evictAll();
+        if (tileZoom > 0 && tiles.size() > 0) {
+            oldTiles = tiles;
+            oldZoom = tileZoom;
+            tiles = spare;
+        }
+        pendingTiles.clear();
+        tileZoom = zoom;
+        wantGen = ++tileGen;
+    }
+
+    /**
+     * Draws a pane: content scrolled by psx/psy into the screen box, from the tiles, with the
+     * gridlines and the previous zoom's tiles under the ones still missing. {@code ahead}: also
+     * draw the tiles about to scroll into view.
+     */
+    private void pane(Canvas canvas, float psx, float psy, float left, float top, float right, float bottom,
+                      int minRow, int maxRow, int minCol, int maxCol, boolean ahead) {
         if (right <= left || bottom <= top) return;
-        float hx = headerW * zoom, hy = headerH * zoom;
-        float cx0 = left - hx + psx, cx1 = right - hx + psx;
-        float cy0 = top - hy + psy, cy1 = bottom - hy + psy;
-        int tx0 = Math.max(0, (int) Math.floor(cx0 / TILE)), tx1 = (int) Math.floor((cx1 - 1) / TILE);
-        int ty0 = Math.max(0, (int) Math.floor(cy0 / TILE)), ty1 = (int) Math.floor((cy1 - 1) / TILE);
-        float ox = Math.round(hx - psx), oy = Math.round(hy - psy);
         canvas.save();
         canvas.clipRect(left, top, right, bottom);
-        for (int ty = ty0; ty <= ty1; ty++) {
-            for (int tx = tx0; tx <= tx1; tx++) {
-                Bitmap b = tile(tx, ty);
-                if (b != null) canvas.drawBitmap(b, ox + tx * TILE, oy + ty * TILE, null);
-            }
+        boolean exact = zoom == tileZoom;
+        if (exact && wantCount + 4 <= wantBuf.length) {
+            float ox = headerW * zoom - psx, oy = headerH * zoom - psy;
+            wantBuf[wantCount++] = left - ox - TILE;
+            wantBuf[wantCount++] = top - oy - TILE;
+            wantBuf[wantCount++] = right - ox + TILE;
+            wantBuf[wantCount++] = bottom - oy + TILE;
         }
+        int missing = exact ? layer(canvas, tiles, tileZoom, psx, psy, left, top, right, bottom, false) : 1;
+        if (missing > 0) {
+            painter.drawGridOnly(canvas, psx, psy, left, top, right, bottom, minRow, maxRow, minCol, maxCol);
+            if (oldTiles.size() > 0) layer(canvas, oldTiles, oldZoom, psx, psy, left, top, right, bottom, true);
+        } else if (ahead) {
+            drawAhead(psx, psy, left, top, right, bottom);
+        }
+        layer(canvas, tiles, tileZoom, psx, psy, left, top, right, bottom, true);
         canvas.restore();
     }
 
-    /** The tile at (tx, ty), drawn now if not cached; null past the sheet's edge or out of memory. */
-    private Bitmap tile(int tx, int ty) {
-        if (tx * (float) TILE >= colX[colX.length - 1] * zoom || ty * (float) TILE >= rowY[rowY.length - 1] * zoom) {
-            return null;
+    /**
+     * The tiles of {@code layer}, drawn at zoom {@code z}, over the screen box: drawn (scaled when
+     * the view is at another zoom), or else counted and requested. Returns the number missing.
+     */
+    private int layer(Canvas canvas, LruCache<Long, Bitmap> layer, float z, float psx, float psy,
+                      float left, float top, float right, float bottom, boolean draw) {
+        if (z <= 0) return 0;
+        float f = zoom / z, step = TILE * f;
+        float ox = headerW * zoom - psx, oy = headerH * zoom - psy;
+        if (f == 1f) {
+            // Whole pixels, so that the tiles meet without seams and draw unscaled.
+            ox = Math.round(ox);
+            oy = Math.round(oy);
         }
+        int tx0 = Math.max(0, (int) Math.floor((left - ox) / step));
+        int ty0 = Math.max(0, (int) Math.floor((top - oy) / step));
+        int tx1 = Math.min(lastTile(colX, z), (int) Math.floor((right - ox - 1) / step));
+        int ty1 = Math.min(lastTile(rowY, z), (int) Math.floor((bottom - oy - 1) / step));
+        int missing = 0;
+        for (int ty = ty0; ty <= ty1; ty++) {
+            for (int tx = tx0; tx <= tx1; tx++) {
+                long key = ((long) tx << 32) | (ty & 0xFFFFFFFFL);
+                Bitmap b = layer.get(key);
+                if (!draw) {
+                    if (b == null) {
+                        missing++;
+                        requestTile(tx, ty, key);
+                    }
+                } else if (b != null) {
+                    if (f == 1f) {
+                        canvas.drawBitmap(b, ox + tx * TILE, oy + ty * TILE, null);
+                    } else {
+                        float x = ox + tx * step, y = oy + ty * step;
+                        rect.set(x, y, x + step, y + step);
+                        canvas.drawBitmap(b, null, rect, bitmapPaint);
+                    }
+                }
+            }
+        }
+        return missing;
+    }
+
+    /** Index of the last tile across the sheet's {@code edges} at zoom {@code z}. */
+    private static int lastTile(float[] edges, float z) {
+        return (int) Math.ceil(edges[edges.length - 1] * z / TILE) - 1;
+    }
+
+    /**
+     * With the visible tiles all drawn, the next row or column in the direction of scrolling is
+     * drawn too, so that it is usually ready when it comes into view. Only when the cache holds
+     * it besides the visible tiles, which it must not push out.
+     */
+    private void drawAhead(float psx, float psy, float left, float top, float right, float bottom) {
+        float dx = sx - lastSx, dy = sy - lastSy;
+        if (dx == 0 && dy == 0) return;
+        float ox = Math.round(headerW * zoom - psx), oy = Math.round(headerH * zoom - psy);
+        int tx0 = Math.max(0, (int) Math.floor((left - ox) / TILE));
+        int ty0 = Math.max(0, (int) Math.floor((top - oy) / TILE));
+        int tx1 = Math.min(lastTile(colX, zoom), (int) Math.floor((right - ox - 1) / TILE));
+        int ty1 = Math.min(lastTile(rowY, zoom), (int) Math.floor((bottom - oy - 1) / TILE));
+        boolean vertical = Math.abs(dy) >= Math.abs(dx);
+        int extra = vertical ? tx1 - tx0 + 1 : ty1 - ty0 + 1;
+        long visible = (long) (tx1 - tx0 + 1) * (ty1 - ty0 + 1);
+        if ((visible + extra) * TILE * TILE * 2 / 1024 > tiles.maxSize()) return;
+        if (vertical) {
+            int ty = dy > 0 ? ty1 + 1 : ty0 - 1;
+            if (ty < 0 || ty > lastTile(rowY, zoom)) return;
+            for (int tx = tx0; tx <= tx1; tx++) aheadTile(tx, ty);
+        } else {
+            int tx = dx > 0 ? tx1 + 1 : tx0 - 1;
+            if (tx < 0 || tx > lastTile(colX, zoom)) return;
+            for (int ty = ty0; ty <= ty1; ty++) aheadTile(tx, ty);
+        }
+    }
+
+    private void aheadTile(int tx, int ty) {
         long key = ((long) tx << 32) | (ty & 0xFFFFFFFFL);
-        Bitmap b = tiles.get(key);
-        if (b != null) return b;
+        if (tiles.get(key) == null) requestTile(tx, ty, key);
+    }
+
+    /** Queues the tile at (tx, ty) of the current zoom for the tile thread. */
+    private void requestTile(final int tx, final int ty, final long key) {
+        if (!pendingTiles.add(key)) return;
+        final int gen = tileGen;
+        final float z = tileZoom;
+        final SheetData d = data;
+        final float[] cx = colX, ry = rowY;
+        final float hw = headerW, hh = headerH;
+        tileHandler().post(() -> {
+            Bitmap b = null;
+            if (gen == wantGen && wanted(tx * TILE, ty * TILE)) b = drawTile(d, cx, ry, hw, hh, z, tx, ty);
+            final Bitmap result = b;
+            Tasks.main(() -> {
+                if (gen != tileGen) return;
+                pendingTiles.remove(key);
+                if (result == null) return;
+                tiles.put(key, result);
+                invalidate();
+            });
+        });
+    }
+
+    /** Tile thread: whether a tile at (x, y) in zoomed pixels is in or near a pane on screen. */
+    private boolean wanted(float x, float y) {
+        float[] a = wantAreas;
+        for (int i = 0; i + 3 < a.length; i += 4) {
+            if (x < a[i + 2] && x + TILE > a[i] && y < a[i + 3] && y + TILE > a[i + 1]) return true;
+        }
+        return false;
+    }
+
+    /** Tile thread: the cells of one tile, or null out of memory. */
+    private Bitmap drawTile(SheetData d, float[] cx, float[] ry, float hw, float hh, float z, int tx, int ty) {
+        Bitmap b;
         try {
             b = Bitmap.createBitmap(TILE, TILE, Bitmap.Config.RGB_565);
         } catch (OutOfMemoryError e) {
-            tiles.evictAll();
             return null;
         }
         b.eraseColor(Color.WHITE);
         tileCanvas.setBitmap(b);
-        float hx = headerW * zoom, hy = headerH * zoom;
-        drawPane(tileCanvas, hx + tx * TILE, hy + ty * TILE, 0, 0, TILE, TILE,
-                0, rowY.length - 2, 0, colX.length - 2);
-        tileCanvas.setBitmap(null);
-        tiles.put(key, b);
+        try {
+            tilePainter.set(d, cx, ry, hw, hh, z);
+            tilePainter.drawPane(tileCanvas, hw * z + tx * TILE, hh * z + ty * TILE, 0, 0, TILE, TILE,
+                    0, ry.length - 2, 0, cx.length - 2);
+        } catch (RuntimeException e) {
+            // The sheet changed meanwhile (a filter); this tile is dropped and drawn again.
+            b = null;
+        } finally {
+            tileCanvas.setBitmap(null);
+        }
         return b;
-    }
-
-    /**
-     * Draws the cells of one pane, scrolled by {@code psx/psy}, clipped to the given screen box and
-     * limited to the given rows and columns.
-     */
-    private void drawPane(Canvas canvas, float psx, float psy, float left, float top, float right, float bottom,
-                          int minRow, int maxRow, int minCol, int maxCol) {
-        if (right <= left || bottom <= top || maxRow < minRow || maxCol < minCol) return;
-        curSx = psx;
-        curSy = psy;
-        float hx = headerW * zoom, hy = headerH * zoom;
-        int c0 = Math.max(minCol, find(colX, (left - hx + psx) / zoom));
-        int c1 = Math.min(maxCol, find(colX, (right - hx + psx) / zoom));
-        int r0 = Math.max(minRow, find(rowY, (top - hy + psy) / zoom));
-        int r1 = Math.min(maxRow, find(rowY, (bottom - hy + psy) / zoom));
-        if (c1 < c0 || r1 < r0) return;
-        float textPx = baseTextPx * zoom;
-        float pad = 3 * density * zoom;
-
-        // Only merges touching the pane are checked per cell.
-        visibleMerges.clear();
-        for (int[] m : data.merges) {
-            if (m[2] < r0 || m[0] > r1 || m[3] < c0 - MAX_SPILL || m[1] > c1) continue;
-            visibleMerges.add(m);
-        }
-        buildMergeGrid(r0, r1, Math.max(0, c0 - MAX_SPILL), c1);
-
-        canvas.save();
-        canvas.clipRect(left, top, right, bottom);
-
-        // Cell fills.
-        for (int r = r0; r <= r1; r++) {
-            for (int c = c0; c <= c1; c++) {
-                int f = data.style(r, c).fillColor;
-                if (f == 0) continue;
-                fill.setColor(f);
-                canvas.drawRect(cellLeft(c), cellTop(r), cellLeft(c + 1), cellTop(r + 1), fill);
-            }
-        }
-
-        // Grid lines, unless the sheet turned them off.
-        if (data.showGrid) {
-            line.setColor(GRID);
-            float gr = Math.min(right, cellLeft(colX.length - 1));
-            float gb = Math.min(bottom, cellTop(rowY.length - 1));
-            for (int c = c0; c <= c1 + 1 && c < colX.length; c++) {
-                float x = cellLeft(c);
-                canvas.drawLine(x, top, x, gb, line);
-            }
-            for (int r = r0; r <= r1 + 1 && r < rowY.length; r++) {
-                float y = cellTop(r);
-                canvas.drawLine(left, y, gr, y, line);
-            }
-        }
-
-        // Merged areas cover the grid lines inside them.
-        for (int[] m : visibleMerges) {
-            int lastR = Math.min(m[2], data.rowCount - 1), lastC = Math.min(m[3], data.colCount - 1);
-            float l = cellLeft(m[1]), t = cellTop(m[0]), rr = cellLeft(lastC + 1), bb = cellTop(lastR + 1);
-            int f = data.style(m[0], m[1]).fillColor;
-            fill.setColor(f != 0 ? f : Color.WHITE);
-            canvas.drawRect(l + 1, t + 1, rr - 1, bb - 1, fill);
-        }
-
-        drawBorders(canvas, r0, r1, c0, c1);
-
-        // Text.
-        for (int r = r0; r <= r1; r++) {
-            if (rowY[r + 1] - rowY[r] <= 0) continue;
-            for (int c = c0; c <= c1; c++) {
-                drawCellText(canvas, r, c, c1, textPx, pad, false);
-            }
-            // Text from a cell left of the pane can overflow into view.
-            for (int c = c0 - 1; c >= minCol && c >= c0 - 8; c--) {
-                if (data.hasCell(r, c)) {
-                    drawCellText(canvas, r, c, c1, textPx, pad, false);
-                    break;
-                }
-            }
-            // And right- or centre-aligned text from a cell right of it.
-            for (int c = c1 + 1; c <= maxCol && c <= c1 + MAX_SPILL; c++) {
-                if (!data.hasCell(r, c)) continue;
-                int al = data.style(r, c).align;
-                if (!data.isNumber(r, c) && (al == CellStyle.ALIGN_RIGHT || al == CellStyle.ALIGN_CENTER)) {
-                    drawCellText(canvas, r, c, c1, textPx, pad, false);
-                }
-                break;
-            }
-        }
-        // A merge across the freeze line is drawn in each pane it reaches.
-        for (int[] m : visibleMerges) {
-            if (m[2] >= minRow && m[3] >= minCol) drawCellText(canvas, m[0], m[1], c1, textPx, pad, true);
-        }
-        drawFilterButtons(canvas, r0, r1, c0, c1);
-        canvas.restore();
     }
 
     // ------------------------------------------------------------- filters
@@ -651,44 +678,9 @@ public final class SheetView extends View {
     }
 
     private OnFilterListener filterListener;
-    private final android.graphics.Path arrow = new android.graphics.Path();
 
     public void setOnFilterListener(OnFilterListener l) {
         filterListener = l;
-    }
-
-    /** Size of a filter button at zoom 1, fitted to its header row. */
-    private float filterButtonSize(int r) {
-        return Math.max(4f, Math.min(16 * density, rowY[r + 1] - rowY[r] - 2));
-    }
-
-    /** The AutoFilter's drop-down buttons in its header row, bottom right of each cell. */
-    private void drawFilterButtons(Canvas canvas, int r0, int r1, int c0, int c1) {
-        int[] f = data.filterRange;
-        if (f == null || f[0] < r0 || f[0] > r1) return;
-        int r = f[0];
-        float s = filterButtonSize(r) * zoom;
-        float bottom = cellTop(r + 1) - zoom;
-        for (int c = Math.max(c0, f[1]); c <= Math.min(c1, f[3]); c++) {
-            float right = cellLeft(c + 1) - zoom;
-            rect.set(right - s, bottom - s, right, bottom);
-            boolean active = data.filters.containsKey(c);
-            fill.setColor(active ? FILTER_ACTIVE_BG : FILTER_BG);
-            canvas.drawRect(rect, fill);
-            line.setColor(active ? SELECT : HEADER_LINE);
-            canvas.drawLine(rect.left, rect.top, rect.right, rect.top, line);
-            canvas.drawLine(rect.left, rect.bottom, rect.right, rect.bottom, line);
-            canvas.drawLine(rect.left, rect.top, rect.left, rect.bottom, line);
-            canvas.drawLine(rect.right, rect.top, rect.right, rect.bottom, line);
-            float cx = rect.centerX(), cy = rect.centerY(), w = s * 0.25f;
-            arrow.rewind();
-            arrow.moveTo(cx - w, cy - w * 0.5f);
-            arrow.lineTo(cx + w, cy - w * 0.5f);
-            arrow.lineTo(cx, cy + w * 0.6f);
-            arrow.close();
-            fill.setColor(active ? SELECT : HEADER_TEXT);
-            canvas.drawPath(arrow, fill);
-        }
     }
 
     /** Row heights changed (a filter): lay the rows out again. */
@@ -697,349 +689,14 @@ public final class SheetView extends View {
         dropTiles();
         float px = SIZE_FACTOR * density;
         int rows = data.rowCount;
-        float extra = rowY.length > rows + 1 ? rowY[rows + 1] - rowY[rows] : 0;
-        for (int r = 0; r < rows; r++) rowY[r + 1] = rowY[r] + data.rowHeights[r] * 1.333f * px;
-        for (int r = rows; r < rowY.length - 1; r++) rowY[r + 1] = rowY[r] + extra;
+        float[] y = rowY.clone();
+        float extra = y.length > rows + 1 ? y[rows + 1] - y[rows] : 0;
+        for (int r = 0; r < rows; r++) y[r + 1] = y[r] + data.rowHeights[r] * 1.333f * px;
+        for (int r = rows; r < y.length - 1; r++) y[r + 1] = y[r] + extra;
+        rowY = y;
         selRow = selCol = -1;
         clamp();
         invalidate();
-    }
-
-    private void buildMergeGrid(int r0, int r1, int c0, int c1) {
-        gridR0 = r0;
-        gridC0 = c0;
-        gridRows = r1 - r0 + 1;
-        gridCols = c1 - c0 + 1;
-        int n = gridRows * gridCols;
-        if (mergeGrid.length < n) mergeGrid = new int[n];
-        java.util.Arrays.fill(mergeGrid, 0, n, 0);
-        for (int i = 0; i < visibleMerges.size(); i++) {
-            int[] m = visibleMerges.get(i);
-            int ra = Math.max(m[0], r0), rb = Math.min(m[2], r1);
-            int ca = Math.max(m[1], c0), cb = Math.min(m[3], c1);
-            for (int r = ra; r <= rb; r++) {
-                int base = (r - r0) * gridCols - c0;
-                for (int c = ca; c <= cb; c++) mergeGrid[base + c] = i + 1;
-            }
-        }
-    }
-
-    /** The visible merge covering a cell, from the grid when the cell is in it. */
-    private int[] visibleMergeAt(int r, int c) {
-        if (visibleMerges.isEmpty()) return null;
-        int rr = r - gridR0, cc = c - gridC0;
-        if (rr >= 0 && rr < gridRows && cc >= 0 && cc < gridCols) {
-            int i = mergeGrid[rr * gridCols + cc];
-            return i == 0 ? null : visibleMerges.get(i - 1);
-        }
-        return mergeAt(visibleMerges, r, c);
-    }
-
-    // ------------------------------------------------------------- borders
-
-    /**
-     * Cell borders. A shared edge shows the heavier of the two cells' borders on that side; each
-     * cell draws its right and bottom edge, the pane's first row and column also their top / left.
-     */
-    private void drawBorders(Canvas canvas, int r0, int r1, int c0, int c1) {
-        for (int r = r0; r <= r1; r++) {
-            if (rowY[r + 1] - rowY[r] <= 0) continue;
-            float t = cellTop(r), b = cellTop(r + 1);
-            for (int c = c0; c <= c1; c++) {
-                CellStyle st = data.style(r, c);
-                float l = cellLeft(c), rr = cellLeft(c + 1);
-                if (st.diagonals != 0) {
-                    if ((st.diagonals & CellStyle.DIAG_DOWN) != 0) {
-                        edge(canvas, l, t, rr, b, st, CellStyle.DIAGONAL, CellStyle.DEFAULT, CellStyle.DIAGONAL);
-                    }
-                    if ((st.diagonals & CellStyle.DIAG_UP) != 0) {
-                        edge(canvas, l, b, rr, t, st, CellStyle.DIAGONAL, CellStyle.DEFAULT, CellStyle.DIAGONAL);
-                    }
-                }
-                if (c == c0) {
-                    CellStyle left = c > 0 ? data.style(r, c - 1) : CellStyle.DEFAULT;
-                    edge(canvas, l, t, l, b, st, CellStyle.LEFT, left, CellStyle.RIGHT);
-                }
-                if (r == r0) {
-                    CellStyle above = r > 0 ? data.style(r - 1, c) : CellStyle.DEFAULT;
-                    edge(canvas, l, t, rr, t, st, CellStyle.TOP, above, CellStyle.BOTTOM);
-                }
-                // Edges inside a merged area are not drawn, as in Excel.
-                int[] m = visibleMergeAt(r, c);
-                if (m == null || c + 1 > m[3]) {
-                    edge(canvas, rr, t, rr, b, st, CellStyle.RIGHT, data.style(r, c + 1), CellStyle.LEFT);
-                }
-                if (m == null || r + 1 > m[2]) {
-                    edge(canvas, l, b, rr, b, st, CellStyle.BOTTOM, data.style(r + 1, c), CellStyle.TOP);
-                }
-            }
-        }
-    }
-
-    private void edge(Canvas canvas, float x1, float y1, float x2, float y2,
-                      CellStyle a, int sideA, CellStyle b, int sideB) {
-        byte sa = a.border(sideA), sb = b.border(sideB);
-        if (sa == CellStyle.B_NONE && sb == CellStyle.B_NONE) return;
-        byte style;
-        int color;
-        if (sa >= sb) {
-            style = sa;
-            color = a.borderColor[sideA];
-        } else {
-            style = sb;
-            color = b.borderColor[sideB];
-        }
-        border.setColor(color != 0 ? color : Color.BLACK);
-        // A thin border is one screen pixel at normal size (as in Excel and Mi Doc) and grows when
-        // zoomed in; medium and thick are two and three times that.
-        float unit = Math.max(1f, density * zoom * 0.4f);
-        float wdt;
-        switch (style) {
-            case CellStyle.B_HAIR:
-                wdt = 1f;
-                break;
-            case CellStyle.B_MEDIUM:
-            case CellStyle.B_MEDIUM_DASHED:
-                wdt = 2 * unit;
-                break;
-            case CellStyle.B_THICK:
-                wdt = 3 * unit;
-                break;
-            default:
-                wdt = unit;
-        }
-        border.setStrokeWidth(wdt);
-        border.setPathEffect(style == CellStyle.B_DOTTED ? dotted
-                : style == CellStyle.B_DASHED || style == CellStyle.B_MEDIUM_DASHED ? dashed : null);
-        if (style == CellStyle.B_DOUBLE) {
-            boolean vertical = x1 == x2;
-            float off = unit;
-            if (vertical) {
-                canvas.drawLine(x1 - off, y1, x2 - off, y2, border);
-                canvas.drawLine(x1 + off, y1, x2 + off, y2, border);
-            } else {
-                canvas.drawLine(x1, y1 - off, x2, y2 - off, border);
-                canvas.drawLine(x1, y1 + off, x2, y2 + off, border);
-            }
-        } else {
-            canvas.drawLine(x1, y1, x2, y2, border);
-        }
-    }
-
-    // ---------------------------------------------------------------- text
-
-    /**
-     * Sets the cell's font on {@code p}: the phone's serif, sans or monospace face for the cell's
-     * font, stretched so {@code s} is as wide as in Excel (Calibri and Times are narrower than the
-     * phone fonts). Then text wraps, overflows and shows "###" where Excel does.
-     */
-    private void applyFont(Paint p, CellStyle st, String s) {
-        p.setTypeface(FontMatch.typeface(st.font, st.bold, st.italic));
-        p.setFakeBoldText(FontMatch.fakeBold(st.font, st.bold, st.italic));
-        p.setTextScaleX(st.font == null ? 1f : widthScale(st, s));
-    }
-
-    private float widthScale(CellStyle st, String s) {
-        java.util.HashMap<String, Float> byText = widthScales.get(st);
-        Float scale = byText == null ? null : byText.get(s);
-        if (scale != null) return scale;
-        if (widthScaleCount > 5000) {
-            widthScales.clear();
-            widthScaleCount = 0;
-            byText = null;
-        }
-        if (byText == null) {
-            byText = new java.util.HashMap<>();
-            widthScales.put(st, byText);
-        }
-        scale = FontMatch.scale(st.font, st.bold, st.italic, s);
-        byText.put(s, scale);
-        widthScaleCount++;
-        return scale;
-    }
-
-    private void drawCellText(Canvas canvas, int r, int c, int lastVisibleCol, float textPx, float pad,
-                              boolean merged) {
-        if (!merged && visibleMergeAt(r, c) != null) return;
-        String s = data.text(r, c);
-        if (s == null || s.isEmpty()) return;
-        CellStyle st = data.style(r, c);
-        boolean number = data.isNumber(r, c);
-        int lastR = r, lastC = c;
-        if (merged) {
-            int[] m = visibleMergeAt(r, c);
-            if (m != null) {
-                lastR = Math.min(m[2], data.rowCount - 1);
-                lastC = Math.min(m[3], data.colCount - 1);
-            }
-        }
-        float left = cellLeft(c), top = cellTop(r);
-        float right = cellLeft(lastC + 1), bottom = cellTop(lastR + 1);
-        if (bottom - top < 2) return;
-        int align = st.align;
-        if (align == CellStyle.ALIGN_GENERAL) align = number ? CellStyle.ALIGN_RIGHT : CellStyle.ALIGN_LEFT;
-        // Each indent level is about three characters wide.
-        float indent = st.indent * 9f * SIZE_FACTOR * density * zoom;
-
-        if (st.rotation != 0) {
-            drawRotated(canvas, s, st, textPx, left, top, right, bottom, pad);
-            return;
-        }
-        if (st.wrap && !number) {
-            drawWrapped(canvas, r, c, s, st, align, left, top, right, bottom, pad, indent);
-            return;
-        }
-
-        text.setTextSize(textPx * (st.fontSize > 0 ? st.fontSize : 1f));
-        text.setColor(st.textColor != 0 ? st.textColor : Color.BLACK);
-        text.setUnderlineText(st.underline);
-
-        // Without wrapping, line breaks inside a cell become spaces.
-        if (s.indexOf('\n') >= 0) s = s.replace('\n', ' ');
-        applyFont(text, st, s);
-        float tw = text.measureText(s);
-
-        // Text too wide for its cell spills into empty neighbours, like Excel: left-aligned to the
-        // right, right-aligned to the left, centred to both sides.
-        float clipLeft = left, clipRight = right;
-        int firstCol = c, lastCol = lastC;
-        if (!merged && !number && tw + indent > right - left - 2 * pad) {
-            float need = tw + indent + 2 * pad;
-            if (align == CellStyle.ALIGN_LEFT || align == CellStyle.ALIGN_CENTER) {
-                float reach = align == CellStyle.ALIGN_LEFT ? left + need : (left + right + need) / 2f;
-                int k = lastC + 1;
-                while (k < colX.length - 1 && k <= lastVisibleCol + 1 && !data.hasCell(r, k) && clipRight < reach) {
-                    lastCol = k;
-                    clipRight = cellLeft(++k);
-                }
-            }
-            if (align == CellStyle.ALIGN_RIGHT || align == CellStyle.ALIGN_CENTER) {
-                float reach = align == CellStyle.ALIGN_RIGHT ? right - need : (left + right - need) / 2f;
-                int k = c - 1;
-                while (k >= 0 && k >= c - MAX_SPILL && !data.hasCell(r, k) && clipLeft > reach) {
-                    firstCol = k;
-                    clipLeft = cellLeft(k--);
-                }
-            }
-            if (firstCol < c || lastCol > lastC) hideGridUnder(canvas, r, firstCol, lastCol, top, bottom, c, lastC);
-        }
-        if (number && tw > right - left - 2 * pad) {
-            // Excel shows #### when a number does not fit.
-            s = "###";
-            tw = text.measureText(s);
-        }
-        float x;
-        if (align == CellStyle.ALIGN_RIGHT) x = right - pad - tw - indent;
-        else if (align == CellStyle.ALIGN_CENTER) x = (left + right - tw) / 2f;
-        else x = left + pad + indent;
-
-        text.getFontMetrics(metrics);
-        float textH = metrics.descent - metrics.ascent;
-        float y;
-        if (textH > bottom - top || st.vAlign == CellStyle.V_BOTTOM) {
-            y = bottom - pad * 0.4f - metrics.descent;
-        } else if (st.vAlign == CellStyle.V_TOP) {
-            y = top + pad * 0.4f - metrics.ascent;
-        } else {
-            y = (top + bottom) / 2f - (metrics.ascent + metrics.descent) / 2f;
-        }
-
-        boolean needClip = x < clipLeft + 1 || x + tw > clipRight - 1 || textH > bottom - top;
-        if (needClip) {
-            canvas.save();
-            canvas.clipRect(clipLeft + 1, top, clipRight - 1, bottom);
-        }
-        canvas.drawText(s, x, y, text);
-        if (needClip) canvas.restore();
-    }
-
-    /**
-     * Excel hides the gridlines under text that spills into neighbouring cells, so the text reads
-     * as one block. Cell borders stay.
-     */
-    private void hideGridUnder(Canvas canvas, int r, int firstCol, int lastCol, float top, float bottom,
-                               int ownFirst, int ownLast) {
-        if (!data.showGrid) return;
-        for (int k = firstCol + 1; k <= lastCol; k++) {
-            if (k > ownFirst && k <= ownLast) continue;
-            CellStyle a = data.style(r, k - 1), b = data.style(r, k);
-            if (a.border(CellStyle.RIGHT) != CellStyle.B_NONE || b.border(CellStyle.LEFT) != CellStyle.B_NONE) continue;
-            int f = a.fillColor != 0 ? a.fillColor : b.fillColor;
-            cover.setColor(f != 0 ? f : Color.WHITE);
-            float x = cellLeft(k);
-            canvas.drawLine(x, top + 1, x, bottom - 1, cover);
-        }
-    }
-
-    /** Rotated text, or letters stacked top to bottom (rotation 255), centred in the cell. */
-    private void drawRotated(Canvas canvas, String s, CellStyle st, float textPx,
-                             float left, float top, float right, float bottom, float pad) {
-        text.setTextSize(textPx * (st.fontSize > 0 ? st.fontSize : 1f));
-        text.setColor(st.textColor != 0 ? st.textColor : Color.BLACK);
-        text.setUnderlineText(false);
-        s = s.replace('\n', ' ');
-        applyFont(text, st, s);
-        text.getFontMetrics(metrics);
-        canvas.save();
-        canvas.clipRect(left + 1, top, right - 1, bottom);
-        if (st.rotation == 255) {
-            float lineH = metrics.descent - metrics.ascent;
-            float cx = (left + right) / 2f;
-            float total = lineH * s.length();
-            float y = st.vAlign == CellStyle.V_TOP || total > bottom - top ? top + pad * 0.4f
-                    : st.vAlign == CellStyle.V_CENTER ? (top + bottom - total) / 2f : bottom - pad * 0.4f - total;
-            for (int i = 0; i < s.length(); i++) {
-                String ch = s.substring(i, i + 1);
-                canvas.drawText(ch, cx - text.measureText(ch) / 2f, y - metrics.ascent, text);
-                y += lineH;
-            }
-        } else {
-            // 1..90: counter-clockwise; 91..180: clockwise by (rotation - 90).
-            float deg = st.rotation <= 90 ? -st.rotation : st.rotation - 90;
-            float tw = text.measureText(s);
-            canvas.translate((left + right) / 2f, (top + bottom) / 2f);
-            canvas.rotate(deg);
-            canvas.drawText(s, -tw / 2f, -(metrics.ascent + metrics.descent) / 2f, text);
-        }
-        canvas.restore();
-    }
-
-    /**
-     * Wrapped text: laid out once at zoom 1 for the column width and drawn scaled, so lines break in
-     * the same places at every zoom, as in Excel.
-     */
-    private void drawWrapped(Canvas canvas, int r, int c, String s, CellStyle st, int align,
-                             float left, float top, float right, float bottom, float pad, float indent) {
-        float width = (right - left - 2 * pad - indent) / zoom;
-        if (width < 4) return;
-        long key = (long) r * MAX_COLS_KEY + c;
-        StaticLayout layout = wrapped.get(key);
-        if (layout == null || layout.getWidth() != (int) width) {
-            TextPaint tp = new TextPaint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
-            tp.setTextSize(baseTextPx * (st.fontSize > 0 ? st.fontSize : 1f));
-            tp.setColor(st.textColor != 0 ? st.textColor : Color.BLACK);
-            tp.setUnderlineText(st.underline);
-            applyFont(tp, st, s);
-            Layout.Alignment a = align == CellStyle.ALIGN_RIGHT ? Layout.Alignment.ALIGN_OPPOSITE
-                    : align == CellStyle.ALIGN_CENTER ? Layout.Alignment.ALIGN_CENTER : Layout.Alignment.ALIGN_NORMAL;
-            layout = StaticLayout.Builder.obtain(s, 0, s.length(), tp, (int) width)
-                    .setAlignment(a)
-                    .setIncludePad(false)
-                    .build();
-            wrapped.put(key, layout);
-        }
-        float h = layout.getHeight() * zoom;
-        float y;
-        if (h > bottom - top || st.vAlign == CellStyle.V_TOP) y = top + pad * 0.4f;
-        else if (st.vAlign == CellStyle.V_CENTER) y = (top + bottom - h) / 2f;
-        else y = bottom - pad * 0.4f - h;
-        float x = left + pad + (align == CellStyle.ALIGN_RIGHT ? 0 : indent);
-        canvas.save();
-        canvas.clipRect(left + 1, top, right - 1, bottom);
-        canvas.translate(x, y);
-        canvas.scale(zoom, zoom);
-        layout.draw(canvas);
-        canvas.restore();
     }
 
     // ------------------------------------------------------------ pictures
