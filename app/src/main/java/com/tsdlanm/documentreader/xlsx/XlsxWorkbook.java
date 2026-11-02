@@ -30,8 +30,6 @@ public final class XlsxWorkbook {
     private static final int MAX_COLS = 16384;
 
     public final List<Sheet> sheets = new ArrayList<>();
-    /** The sheet that was open when the file was saved (index into {@link #sheets}). */
-    public int activeSheet;
     private final ZipFile zip;
     private final XmlFactory xml;
     private boolean date1904;
@@ -79,7 +77,6 @@ public final class XlsxWorkbook {
         if (part == null) throw new IOException("No workbook part");
         try {
             XmlPullParser p = part.parser;
-            int activeTab = 0, raw = -1;
             int e;
             while ((e = p.next()) != XmlPullParser.END_DOCUMENT) {
                 if (e != XmlPullParser.START_TAG) continue;
@@ -87,11 +84,7 @@ public final class XlsxWorkbook {
                 if ("workbookPr".equals(n)) {
                     String v = XmlUtil.attr(p, "date1904");
                     date1904 = "1".equals(v) || "true".equals(v);
-                } else if ("workbookView".equals(n)) {
-                    activeTab = Math.max(0, XmlUtil.intAttr(p, "activeTab", 0));
                 } else if ("sheet".equals(n)) {
-                    // activeTab counts every sheet, hidden ones and chart sheets included.
-                    raw++;
                     String state = XmlUtil.attr(p, "state");
                     if ("hidden".equals(state) || "veryHidden".equals(state)) continue;
                     String id = XmlUtil.attr(p, "id");
@@ -101,7 +94,6 @@ public final class XlsxWorkbook {
                     if (ZipParts.entry(zip, rel.target) == null) continue;
                     String name = XmlUtil.attr(p, "name");
                     sheets.add(new Sheet(name == null ? "Sheet" + (sheets.size() + 1) : name, rel.target));
-                    if (raw == activeTab) activeSheet = sheets.size() - 1;
                 }
             }
         } finally {
@@ -685,7 +677,6 @@ public final class XlsxWorkbook {
         boolean truncated = false;
         boolean showGrid = true, sawView = false;
         int frozenRows = 0, frozenCols = 0;
-        int[] topLeft = null;
         List<SheetData.Picture> pictures = new ArrayList<>();
         int[] filterRange = null;
         Map<Integer, java.util.Set<String>> filterCols = new HashMap<>();
@@ -704,16 +695,12 @@ public final class XlsxWorkbook {
                         sawView = true;
                         String g = XmlUtil.attr(p, "showGridLines");
                         showGrid = !("0".equals(g) || "false".equals(g));
-                        topLeft = parseCell(XmlUtil.attr(p, "topLeftCell"));
                         int d = p.getDepth();
                         while (XmlUtil.nextChild(p, d)) {
                             String state = XmlUtil.attr(p, "state");
                             if ("pane".equals(p.getName()) && ("frozen".equals(state) || "frozenSplit".equals(state))) {
                                 frozenCols = Math.max(0, XmlUtil.intAttr(p, "xSplit", 0));
                                 frozenRows = Math.max(0, XmlUtil.intAttr(p, "ySplit", 0));
-                                // With frozen panes, the scrolling pane's own first cell.
-                                int[] pane = parseCell(XmlUtil.attr(p, "topLeftCell"));
-                                if (pane != null) topLeft = pane;
                             }
                             XmlUtil.skip(p);
                         }
@@ -878,10 +865,6 @@ public final class XlsxWorkbook {
         if (styleList.size() != styles.length) styles = styleList.toArray(new CellStyle[0]);
         SheetData data = new SheetData(rowArr, colCount, heights, widths, merges, truncated, styles, date1904);
         data.showGrid = showGrid;
-        if (topLeft != null) {
-            data.topRow = Math.min(topLeft[0], Math.max(0, rowCount - 1));
-            data.topCol = Math.min(topLeft[1], Math.max(0, colCount - 1));
-        }
         data.defaultRowHeight = defaultRowHeight;
         data.defaultColWidth = defaultColWidth;
         data.pictures.addAll(pictures);

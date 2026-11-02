@@ -84,8 +84,6 @@ public final class SheetData {
     public boolean showGrid = true;
     /** Rows at the top and columns at the left kept in place while scrolling (freeze panes). */
     public int frozenRows, frozenCols;
-    /** First row and column shown when the file was saved (Excel opens scrolled there). */
-    public int topRow, topCol;
     /**
      * AutoFilter range {firstRow, firstCol, lastRow, lastCol}, or null; its first row holds the
      * headers with the filter buttons. {@link #filters} maps a column to the texts shown (a

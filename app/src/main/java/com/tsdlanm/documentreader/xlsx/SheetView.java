@@ -248,14 +248,6 @@ public final class SheetView extends View {
         String widest = String.valueOf(Math.max(1, rowY.length - 1));
         headerW = Math.max(32 * density, headerText.measureText(widest) + 12 * density);
         headerH = 22 * density;
-        if (d != null) {
-            // Open where the sheet was left in Excel.
-            int tc = Math.max(frozenCols, Math.min(d.topCol, colX.length - 2));
-            int tr = Math.max(frozenRows, Math.min(d.topRow, rowY.length - 2));
-            sx = (colX[tc] - colX[frozenCols]) * zoom;
-            sy = (rowY[tr] - rowY[frozenRows]) * zoom;
-            if (getWidth() > 0) clamp();
-        }
         invalidate();
     }
 

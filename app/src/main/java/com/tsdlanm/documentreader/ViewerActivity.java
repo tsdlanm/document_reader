@@ -209,7 +209,7 @@ public final class ViewerActivity extends Activity {
                     } else if (XlsxWorkbook.isXlsx(r.zip)) {
                         r.type = DocumentType.XLSX;
                         r.workbook = XlsxWorkbook.open(r.zip, AndroidXml.INSTANCE);
-                        if (!r.workbook.sheets.isEmpty()) r.firstSheet = r.workbook.loadSheet(r.workbook.activeSheet, maxCells());
+                        if (!r.workbook.sheets.isEmpty()) r.firstSheet = r.workbook.loadSheet(0, maxCells());
                     } else {
                         r.error = R.string.error_unsupported;
                     }
@@ -677,12 +677,9 @@ public final class ViewerActivity extends Activity {
         if (r.workbook.sheets.isEmpty()) {
             sheetMessage.setVisibility(View.VISIBLE);
         } else {
-            // Opens on the sheet that was open in Excel, like Excel itself.
-            showSheet(r.workbook.activeSheet, r.firstSheet);
+            // Always opens on the first sheet, from its first cell.
+            showSheet(0, r.firstSheet);
             r.firstSheet = null;
-            final View active = tabs != null ? tabs.getChildAt(r.workbook.activeSheet) : null;
-            if (active != null) active.post(() -> active.requestRectangleOnScreen(
-                    new android.graphics.Rect(0, 0, active.getWidth(), active.getHeight())));
         }
     }
 
