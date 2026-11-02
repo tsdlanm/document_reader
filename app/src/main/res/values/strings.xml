@@ -30,6 +30,14 @@
     <string name="chart">Chart</string>
     <string name="filter_blank">(Blanks)</string>
     <string name="filter_clear">Show all</string>
+    <string name="search">Search</string>
+    <string name="search_hint">Find in sheet</string>
+    <string name="search_count">%1$d of %2$d</string>
+    <string name="search_count_more">%1$d of %2$d+</string>
+    <string name="search_none">No matches</string>
+    <string name="search_prev">Previous</string>
+    <string name="search_next">Next</string>
+    <string name="search_close">Close search</string>
     <string name="credit">Made by tsdlanm · github.com/tsdlanm</string>
     <string name="reading_mode">Reading mode</string>
     <string name="page_mode">Page layout</string>

@@ -221,6 +221,49 @@ public final class SheetData {
         return i >= 0 && row.kinds[i] != EMPTY;
     }
 
+    /** Cells {@link #search} keeps at most; a count above it is shown as "N+". */
+    public static final int MAX_HITS = 5000;
+
+    /**
+     * Cells whose shown text contains {@code query}, ignoring case, as row, column pairs in
+     * reading order (at most {@link #MAX_HITS}). Hidden rows and columns are skipped. Meant for a
+     * background thread: it only reads, and numbers are formatted without being kept, so a search
+     * does not grow the sheet in memory. {@code cancelled} is checked once per row.
+     */
+    public int[] search(String query, java.util.concurrent.atomic.AtomicBoolean cancelled) {
+        int[] out = new int[64];
+        int n = 0;
+        int len = query.length();
+        if (len == 0) return new int[0];
+        for (int r = 0; r < rowCount && n / 2 < MAX_HITS; r++) {
+            if (cancelled.get()) return null;
+            Row row = rows[r];
+            if (row == null || rowHeights[r] <= 0) continue;
+            for (int i = 0; i < row.size && n / 2 < MAX_HITS; i++) {
+                int c = row.cols[i];
+                if (c < colCount && colWidths[c] <= 0) continue;
+                String t = row.texts[i];
+                if (t == null) {
+                    if (row.kinds[i] != NUMBER) continue;
+                    t = style(row.styles[i]).format.format(row.nums[i], date1904);
+                }
+                if (t == null || !containsIgnoreCase(t, query)) continue;
+                if (n + 2 > out.length) out = Arrays.copyOf(out, out.length * 2);
+                out[n++] = r;
+                out[n++] = c;
+            }
+        }
+        return Arrays.copyOf(out, n);
+    }
+
+    private static boolean containsIgnoreCase(String text, String query) {
+        int len = query.length();
+        for (int i = 0, end = text.length() - len; i <= end; i++) {
+            if (text.regionMatches(true, i, query, 0, len)) return true;
+        }
+        return false;
+    }
+
     /** Column letters for a 0-based index: 0 -> A, 26 -> AA. */
     public static String columnName(int c) {
         StringBuilder sb = new StringBuilder();

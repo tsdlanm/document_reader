@@ -30,6 +30,23 @@ public class XlsxWorkbookTest {
     }
 
     @Test
+    public void searchFindsTextAndFormattedNumbers() throws Exception {
+        try (ZipFile zip = TestFiles.zip("sample.xlsx")) {
+            SheetData s = XlsxWorkbook.open(zip, TestFiles.XML).loadSheet(0, 1_000_000);
+            java.util.concurrent.atomic.AtomicBoolean no = new java.util.concurrent.atomic.AtomicBoolean();
+            // Ignores case, and reports row and column.
+            assertArrayEquals(new int[]{0, 0}, s.search("nAMa", no));
+            // Numbers are searched as shown, not as stored.
+            assertArrayEquals(new int[]{1, 1}, s.search("1,234.5", no));
+            assertArrayEquals(new int[]{7, 3}, s.search("gabung", no));
+            assertEquals(0, s.search("tidak-ada-ini", no).length);
+            assertEquals(0, s.search("", no).length);
+            no.set(true);
+            assertNull(s.search("a", no));
+        }
+    }
+
+    @Test
     public void readsSheetsAndCells() throws Exception {
         try (ZipFile zip = TestFiles.zip("sample.xlsx")) {
             assertTrue(XlsxWorkbook.isXlsx(zip));

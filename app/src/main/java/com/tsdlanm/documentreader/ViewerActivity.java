@@ -63,7 +63,7 @@ import java.util.zip.ZipFile;
 /** Opens one document and shows it with the matching viewer. */
 public final class ViewerActivity extends Activity {
     private static final int REQUEST_STORAGE = 2;
-    private static final int MENU_GO_TO = 1, MENU_BIGGER = 2, MENU_SMALLER = 3, MENU_MODE = 4;
+    private static final int MENU_GO_TO = 1, MENU_BIGGER = 2, MENU_SMALLER = 3, MENU_MODE = 4, MENU_SEARCH = 5;
 
     /** Everything produced by the background load; owned by the activity once delivered. */
     private static final class Loaded {
@@ -639,6 +639,7 @@ public final class ViewerActivity extends Activity {
         sheetView.setOnCellSelectedListener((row, col, text) ->
                 cellPanel.show(SheetData.columnName(col) + (row + 1), text));
         sheetArea.addView(sheetView);
+        buildSearchBar(sheetArea);
         sheetMessage = new TextView(this);
         sheetMessage.setGravity(Gravity.CENTER);
         sheetMessage.setTextColor(getColor(R.color.text_secondary));
@@ -723,6 +724,8 @@ public final class ViewerActivity extends Activity {
         highlightTab();
         sheetView.setData(data);
         cellPanel.hide();
+        // The word being looked for is looked for on the new sheet too.
+        if (searchBar != null && searchBar.getVisibility() == View.VISIBLE) runSearch();
         sheetMessage.setText(R.string.sheet_empty);
         sheetMessage.setVisibility(data.isEmpty() ? View.VISIBLE : View.GONE);
         if (data.truncated) Toast.makeText(this, R.string.sheet_truncated, Toast.LENGTH_LONG).show();
@@ -768,6 +771,159 @@ public final class ViewerActivity extends Activity {
         cellPanel.hide();
     }
 
+    // -------------------------------------------------------------- search
+
+    private LinearLayout searchBar;
+    private EditText searchInput;
+    private TextView searchCount;
+    /** Found cells of the current sheet as row, column pairs, and the one in focus. */
+    private int[] hits = new int[0];
+    private int hitIndex;
+    /** The text the current hits are for. */
+    private String searched = "";
+    private java.util.concurrent.atomic.AtomicBoolean searchCancel = new java.util.concurrent.atomic.AtomicBoolean();
+    private final Runnable searchLater = this::runSearch;
+
+    /** The search row under the toolbar; the sheet is drawn below it while it is open. */
+    private void buildSearchBar(FrameLayout area) {
+        searchBar = new LinearLayout(this);
+        searchBar.setOrientation(LinearLayout.HORIZONTAL);
+        searchBar.setGravity(Gravity.CENTER_VERTICAL);
+        searchBar.setBackgroundColor(getColor(R.color.header_bg));
+        searchBar.setPadding(dp(12), 0, dp(4), 0);
+        searchBar.setVisibility(View.GONE);
+
+        searchInput = new EditText(this);
+        searchInput.setHint(R.string.search_hint);
+        searchInput.setSingleLine(true);
+        searchInput.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        searchInput.setTextColor(getColor(R.color.header_text));
+        searchInput.setHintTextColor(getColor(R.color.text_secondary));
+        searchInput.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH);
+        searchInput.addTextChangedListener(new android.text.TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {
+            }
+
+            @Override
+            public void onTextChanged(CharSequence s, int start, int before, int count) {
+            }
+
+            @Override
+            public void afterTextChanged(android.text.Editable s) {
+                // Waits for a pause in typing, so each key does not start a scan.
+                searchInput.removeCallbacks(searchLater);
+                searchInput.postDelayed(searchLater, 300);
+            }
+        });
+        searchInput.setOnEditorActionListener((v, action, e) -> {
+            searchInput.removeCallbacks(searchLater);
+            // Enter goes to the next one, or searches first if the typing has not been searched yet.
+            if (!searchInput.getText().toString().equals(searched)) runSearch();
+            else stepHit(1);
+            return true;
+        });
+        searchBar.addView(searchInput, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        searchCount = new TextView(this);
+        searchCount.setTextColor(getColor(R.color.text_secondary));
+        searchCount.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        searchCount.setPadding(dp(8), 0, dp(8), 0);
+        searchBar.addView(searchCount);
+
+        searchBar.addView(searchButton("▲", R.string.search_prev, () -> stepHit(-1)));
+        searchBar.addView(searchButton("▼", R.string.search_next, () -> stepHit(1)));
+        searchBar.addView(searchButton("✕", R.string.search_close, this::closeSearch));
+
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, searchBarHeight(),
+                Gravity.TOP);
+        lp.topMargin = toolbarHeight();
+        area.addView(searchBar, lp);
+    }
+
+    private int searchBarHeight() {
+        return dp(48);
+    }
+
+    private TextView searchButton(String label, int description, Runnable action) {
+        TextView b = new TextView(this);
+        b.setText(label);
+        b.setContentDescription(getString(description));
+        b.setGravity(Gravity.CENTER);
+        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        b.setTextColor(getColor(R.color.header_text));
+        b.setMinWidth(dp(44));
+        b.setOnClickListener(v -> action.run());
+        b.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        return b;
+    }
+
+    private void openSearch() {
+        if (searchBar == null) return;
+        searchBar.setVisibility(View.VISIBLE);
+        sheetView.setTopInset(toolbarHeight() + searchBarHeight());
+        searchInput.requestFocus();
+        android.view.inputmethod.InputMethodManager im = getSystemService(android.view.inputmethod.InputMethodManager.class);
+        if (im != null) im.showSoftInput(searchInput, 0);
+        if (searchInput.length() > 0) runSearch();
+    }
+
+    private void closeSearch() {
+        if (searchBar == null || searchBar.getVisibility() != View.VISIBLE) return;
+        searchInput.removeCallbacks(searchLater);
+        searchCancel.set(true);
+        searchBar.setVisibility(View.GONE);
+        sheetView.setTopInset(toolbarHeight());
+        sheetView.setMatches(null, -1);
+        hits = new int[0];
+        android.view.inputmethod.InputMethodManager im = getSystemService(android.view.inputmethod.InputMethodManager.class);
+        if (im != null) im.hideSoftInputFromWindow(searchInput.getWindowToken(), 0);
+    }
+
+    /** Looks for the typed text on the current sheet, off the main thread. */
+    private void runSearch() {
+        searchCancel.set(true);
+        final String query = searchInput.getText().toString();
+        searched = query;
+        final SheetData data = sheetData;
+        if (data == null || query.isEmpty()) {
+            hits = new int[0];
+            sheetView.setMatches(null, -1);
+            searchCount.setText("");
+            return;
+        }
+        final java.util.concurrent.atomic.AtomicBoolean cancel = new java.util.concurrent.atomic.AtomicBoolean();
+        searchCancel = cancel;
+        Tasks.io().execute(() -> {
+            final int[] found = data.search(query, cancel);
+            Tasks.main(() -> {
+                if (destroyed || found == null || cancel.get() || data != sheetData) return;
+                hits = found;
+                hitIndex = 0;
+                showHit();
+            });
+        });
+    }
+
+    private void stepHit(int by) {
+        int n = hits.length / 2;
+        if (n == 0) return;
+        hitIndex = (hitIndex + by + n) % n;
+        showHit();
+    }
+
+    private void showHit() {
+        int n = hits.length / 2;
+        sheetView.setMatches(hits, n == 0 ? -1 : hitIndex);
+        if (n == 0) {
+            searchCount.setText(R.string.search_none);
+            return;
+        }
+        searchCount.setText(getString(n >= SheetData.MAX_HITS ? R.string.search_count_more : R.string.search_count,
+                hitIndex + 1, n));
+        sheetView.showCell(hits[hitIndex * 2], hits[hitIndex * 2 + 1]);
+    }
+
     private void highlightTab() {
         if (tabs == null) return;
         for (int i = 0; i < tabs.getChildCount(); i++) {
@@ -785,6 +941,10 @@ public final class ViewerActivity extends Activity {
     public boolean onCreateOptionsMenu(Menu menu) {
         if ((pdfView != null && pdfView.getPageCount() > 1) || (docPages != null && docPages.getPageCount() > 1)) {
             menu.add(0, MENU_GO_TO, 0, R.string.go_to_page).setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM);
+        }
+        if (sheetView != null) {
+            menu.add(0, MENU_SEARCH, 0, R.string.search).setIcon(android.R.drawable.ic_menu_search)
+                    .setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS);
         }
         if (docAdapter != null) {
             menu.add(0, MENU_SMALLER, 0, R.string.text_smaller).setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM);
@@ -808,6 +968,9 @@ public final class ViewerActivity extends Activity {
                 return true;
             case MENU_MODE:
                 toggleDocMode();
+                return true;
+            case MENU_SEARCH:
+                openSearch();
                 return true;
             case MENU_BIGGER:
                 if (docAdapter != null) docAdapter.setTextScale(docAdapter.getTextScale() + 0.15f);
@@ -897,7 +1060,9 @@ public final class ViewerActivity extends Activity {
     @Override
     @SuppressWarnings("deprecation")
     public void onBackPressed() {
-        if (cellPanel != null && cellPanel.isExpanded()) {
+        if (searchBar != null && searchBar.getVisibility() == View.VISIBLE) {
+            closeSearch();
+        } else if (cellPanel != null && cellPanel.isExpanded()) {
             cellPanel.setExpanded(false);
         } else if (cellPanel != null && cellPanel.isOpen()) {
             cellPanel.hide();

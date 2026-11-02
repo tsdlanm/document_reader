@@ -217,6 +217,8 @@ public final class SheetView extends View {
         frozenRows = d == null ? 0 : d.frozenRows;
         frozenCols = d == null ? 0 : d.frozenCols;
         selRow = selCol = -1;
+        matches = new int[0];
+        matchCurrent = -1;
         sx = sy = 0;
         scroller.forceFinished(true);
         int cols = d == null ? 0 : d.colCount;
@@ -421,6 +423,7 @@ public final class SheetView extends View {
         lastSy = sy;
 
         drawPictures(canvas, w, h);
+        drawMatches(canvas, w, h);
         drawSelection(canvas, w, h);
 
         line.setColor(FREEZE_LINE);
@@ -758,6 +761,77 @@ public final class SheetView extends View {
             });
         });
         return null;
+    }
+
+    // -------------------------------------------------------------- search
+
+    private static final int MATCH_FILL = 0x66FFEB3B, MATCH_CURRENT_FILL = 0x99FF9800, MATCH_CURRENT = 0xFFE65100;
+    /** Found cells as row, column pairs, and the one in focus (-1 for none). */
+    private int[] matches = new int[0];
+    private int matchCurrent = -1;
+
+    /** Marks the cells found by a search; {@code current} is the pair shown in the stronger colour. */
+    public void setMatches(int[] cells, int current) {
+        matches = cells == null ? new int[0] : cells;
+        matchCurrent = current;
+        invalidate();
+    }
+
+    /** Scrolls so that the cell is on screen, centred only when it is not already. */
+    public void showCell(int row, int col) {
+        if (data == null || row >= rowY.length - 1 || col >= colX.length - 1) return;
+        int[] m = mergeAt(row, col);
+        int lastR = m != null ? Math.min(m[2], rowY.length - 2) : row;
+        int lastC = m != null ? Math.min(m[3], colX.length - 2) : col;
+        float w = getWidth(), h = getHeight() - topInset;
+        if (col >= frozenCols) {
+            float l = headerW * zoom + colX[col] * zoom - sx, r = headerW * zoom + colX[lastC + 1] * zoom - sx;
+            if (l < frozenRight() || r > w) {
+                sx = headerW * zoom + (colX[col] + colX[lastC + 1]) / 2f * zoom - (frozenRight() + w) / 2f;
+            }
+        }
+        if (row >= frozenRows) {
+            float t = headerH * zoom + rowY[row] * zoom - sy, b = headerH * zoom + rowY[lastR + 1] * zoom - sy;
+            if (t < frozenBottom() || b > h) {
+                sy = headerH * zoom + (rowY[row] + rowY[lastR + 1]) / 2f * zoom - (frozenBottom() + h) / 2f;
+            }
+        }
+        scroller.forceFinished(true);
+        clamp();
+        invalidate();
+    }
+
+    /** The found cells on screen, over the tiles so that the text underneath shows through. */
+    private void drawMatches(Canvas canvas, int w, int h) {
+        if (matches.length == 0) return;
+        float hx = headerW * zoom, hy = headerH * zoom;
+        float fx = Math.min(w, frozenRight()), fy = Math.min(h, frozenBottom());
+        for (int i = 0; i + 1 < matches.length; i += 2) {
+            int r = matches[i], c = matches[i + 1];
+            if (r >= rowY.length - 1 || c >= colX.length - 1) continue;
+            scrollFor(r, c);
+            float l = cellLeft(c), t = cellTop(r);
+            int[] m = mergeAt(r, c);
+            float rr = cellLeft(m != null ? Math.min(m[3], colX.length - 2) + 1 : c + 1);
+            float bb = cellTop(m != null ? Math.min(m[2], rowY.length - 2) + 1 : r + 1);
+            if (rr <= hx || bb <= hy || l >= w || t >= h) continue;
+            canvas.save();
+            canvas.clipRect(c < frozenCols ? hx : fx, r < frozenRows ? hy : fy, w, h);
+            boolean current = i == matchCurrent * 2;
+            fill.setColor(current ? MATCH_CURRENT_FILL : MATCH_FILL);
+            canvas.drawRect(l, t, rr, bb, fill);
+            if (current) {
+                line.setColor(MATCH_CURRENT);
+                float sw = line.getStrokeWidth();
+                line.setStrokeWidth(2 * density);
+                canvas.drawLine(l, t, rr, t, line);
+                canvas.drawLine(l, bb, rr, bb, line);
+                canvas.drawLine(l, t, l, bb, line);
+                canvas.drawLine(rr, t, rr, bb, line);
+                line.setStrokeWidth(sw);
+            }
+            canvas.restore();
+        }
     }
 
     private void drawSelection(Canvas canvas, int w, int h) {
