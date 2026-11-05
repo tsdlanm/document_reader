@@ -717,6 +717,11 @@ public final class SheetView extends View {
             canvas.clipRect(fc < frozenCols ? headerW * zoom : Math.min(w, frozenRight()),
                     fr < frozenRows ? headerH * zoom : Math.min(h, frozenBottom()), w, h);
             rect.set(l, t, r, b);
+            if (p.shapes != null) {
+                ShapePainter.draw(canvas, p.shapes, rect, 1.333f * SIZE_FACTOR * density * zoom);
+                canvas.restore();
+                continue;
+            }
             Bitmap bmp = p.part == null ? null : image(p.part, (r - l) / zoom);
             if (bmp != null) {
                 canvas.drawBitmap(bmp, null, rect, bitmapPaint);

@@ -152,6 +152,46 @@ public final class SheetData {
         public String part;
         public int fromCol, fromRow, toCol = -1, toRow;
         public long fromColOff, fromRowOff, toColOff, toRowOff, width, height;
+        /** Drawn shapes (boxes, buttons, lines) instead of a picture; null for a picture or chart. */
+        public List<Shape> shapes;
+    }
+
+    /** A shape inside an anchor; {@code x0..y1} is its part of the anchor's box (0..1). */
+    public static final class Shape {
+        public float x0, y0, x1 = 1, y1 = 1;
+        /** DocModel.GEOM_*; {@link #path} for GEOM_PATH. */
+        public int geometry;
+        public float[] path;
+        public boolean flipH, flipV;
+        public float rotation;
+        /** Fill colour (0 for none) or a gradient. */
+        public int fill;
+        public com.tsdlanm.documentreader.docx.DocModel.Gradient gradient;
+        /** Outline colour (0 for none) and width in points. */
+        public int line;
+        public float lineWidth = 0.75f;
+        /** Text paragraphs; vertical anchor 0 top, 1 middle, 2 bottom; insets in points. */
+        public List<Para> text;
+        public int anchor;
+        public float insetL = 7.2f, insetT = 3.6f, insetR = 7.2f, insetB = 3.6f;
+        /** Layout cache for the drawing code. */
+        public transient Object layout;
+        public transient float layoutKey;
+    }
+
+    public static final class Para {
+        /** android.text.Layout.Alignment ordinal: 0 normal, 1 opposite, 2 centre. */
+        public int align;
+        public final List<Run> runs = new ArrayList<>();
+        /** Size of an empty paragraph, in points. */
+        public float size = 11;
+    }
+
+    public static final class Run {
+        public String text;
+        public float size = 11;
+        public boolean bold, italic, underline;
+        public int color = 0xFF000000;
     }
 
     private final Row[] rows;
@@ -191,6 +231,14 @@ public final class SheetData {
             row.texts[i] = t;
         }
         return t;
+    }
+
+    /** The value of a number cell, or NaN. */
+    double number(int r, int c) {
+        if (r < 0 || r >= rowCount) return Double.NaN;
+        Row row = rows[r];
+        int i = index(row, c);
+        return i >= 0 && row.kinds[i] == NUMBER ? row.nums[i] : Double.NaN;
     }
 
     public boolean isNumber(int r, int c) {

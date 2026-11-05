@@ -181,6 +181,21 @@ final class NumberFormat {
 
     private static final ThreadLocal<DecimalFormat> GENERAL_DECIMAL = new ThreadLocal<>();
 
+    /**
+     * "General" rounded to at most {@code decimals} places: Excel drops decimals until a General
+     * number fits its column, and shows "###" only when even the whole number does not.
+     */
+    static String generalRounded(double v, int decimals) {
+        BigDecimal bd = new BigDecimal(v).setScale(Math.max(0, decimals), java.math.RoundingMode.HALF_UP)
+                .stripTrailingZeros();
+        int scale = Math.max(0, bd.scale());
+        if (scale == 0) return bd.setScale(0, java.math.RoundingMode.HALF_UP).toPlainString();
+        DecimalFormat df = new DecimalFormat("0", DecimalFormatSymbols.getInstance());
+        df.setGroupingUsed(false);
+        df.setMaximumFractionDigits(scale);
+        return df.format(bd);
+    }
+
     /** Excel "General": up to 11 significant digits, scientific for very large/small values. */
     static String general(double v) {
         if (v == 0) return "0";

@@ -203,6 +203,17 @@ public final class XlsxWorkbook {
                             shown = true;
                             XmlUtil.skip(p);
                             break;
+                        case "sp":
+                        case "cxnSp":
+                        case "grpSp": {
+                            List<SheetData.Shape> shapes = new ArrayList<>();
+                            new XlsxShapes(theme).read(p, shapes);
+                            if (!shapes.isEmpty()) {
+                                pic.shapes = shapes;
+                                shown = true;
+                            }
+                            break;
+                        }
                         default:
                             XmlUtil.skip(p);
                     }

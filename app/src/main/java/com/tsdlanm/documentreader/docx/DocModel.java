@@ -41,6 +41,10 @@ public final class DocModel {
         public boolean pageBreakBefore;
         /** Keep on the same page as the next paragraph (headings). */
         public boolean keepNext;
+        /** Background colour of the whole paragraph (between its indents), 0 for none. */
+        public int shading;
+        /** Borders (B_TOP, B_LEFT, B_BOTTOM, B_RIGHT, B_BETWEEN), or null for none. */
+        public Border[] borders;
         /** Custom tab stops, sorted, with their TAB_* alignment and leader character (0 for none). */
         public int[] tabs = new int[0];
         public int[] tabAligns = new int[0];
@@ -52,6 +56,8 @@ public final class DocModel {
         public String listPrefix;
         /** Separator after the list marker: tab, space or nothing. */
         public String listSuffix = "\t";
+        /** The marker's own colour (ARGB) and size (half points); 0 for the paragraph mark's. */
+        public int listColor, listHalfPoints;
         /** Font of the paragraph mark; sets the height of an empty paragraph. */
         public int markHalfPoints;
         public String markFont;
@@ -81,6 +87,7 @@ public final class DocModel {
             p.line = line;
             p.lineRule = lineRule;
             p.contextualSpacing = contextualSpacing;
+            p.borders = borders;
             p.tabs = tabs;
             p.tabAligns = tabAligns;
             p.tabLeaders = tabLeaders;
@@ -88,6 +95,7 @@ public final class DocModel {
             p.heading = heading;
             p.markHalfPoints = markHalfPoints;
             p.markFont = markFont;
+            p.shading = shading;
             return p;
         }
     }
@@ -98,6 +106,8 @@ public final class DocModel {
 
     public static final class Run {
         public final StringBuilder text = new StringBuilder();
+        /** A picture inside the line of text (the run's text is one U+FFFC), or null. */
+        public Image image;
         public boolean bold, italic, underline, strike, caps, smallCaps;
         /** Font size in half points, 0 for the document default. */
         public int halfPoints;
@@ -121,7 +131,7 @@ public final class DocModel {
             return bold == o.bold && italic == o.italic && underline == o.underline && strike == o.strike
                     && caps == o.caps && smallCaps == o.smallCaps && halfPoints == o.halfPoints
                     && color == o.color && background == o.background && vertAlign == o.vertAlign
-                    && !pageNumber && !o.pageNumber
+                    && !pageNumber && !o.pageNumber && image == null && o.image == null
                     && charSpacing == o.charSpacing && widthPercent == o.widthPercent && kern == o.kern
                     && (font == null ? o.font == null : font.equals(o.font));
         }
@@ -138,10 +148,22 @@ public final class DocModel {
         public boolean floating;
         /** Floating with text wrapped around it (square/tight); large ones push text down. */
         public boolean wrapsText;
+        /**
+         * Wrapped above and below: takes its own lines like an inline picture, but sits where its
+         * horizontal position (hRel, hAlign, hOffset) puts it.
+         */
+        public boolean positioned;
+        /** A floating shape wrapped above and below: the text after it continues below it. */
+        public boolean clearsText;
         /** Floating position: REL_* reference and either an alignment or an EMU offset. */
         public int hRel = REL_MARGIN, vRel = REL_PARAGRAPH;
         public int hAlign = -1, vAlign = -1;
         public long hOffset, vOffset;
+        /**
+         * A part of a group: the group's frame size (EMU) is what the position places, and this
+         * drawing sits {@code offX, offY} into it. 0 for a drawing of its own.
+         */
+        public long frameW, frameH, offX, offY;
 
         Drawing(long widthEmu, long heightEmu) {
             this.widthEmu = widthEmu;
@@ -154,6 +176,14 @@ public final class DocModel {
         public final String part;
         /** Fractions of the picture cut off left, top, right and bottom; null when shown whole. */
         public float[] crop;
+        /** Colour effect: EFFECT_*. */
+        public int effect;
+        /** Opacity, 0..1 (a:alphaModFix). */
+        public float alpha = 1f;
+        /** A positioned picture moved after its paragraph's text (its offset is then spent). */
+        public boolean afterText;
+        /** Inline pictures that follow this one on the same line. */
+        public final List<Image> beside = new ArrayList<>();
 
         public Image(String part, long widthEmu, long heightEmu) {
             super(widthEmu, heightEmu);
@@ -161,7 +191,35 @@ public final class DocModel {
         }
     }
 
-    public static final int GEOM_RECT = 0, GEOM_ROUND_RECT = 1, GEOM_ELLIPSE = 2, GEOM_LINE = 3;
+    /** A linear gradient: colours at positions 0..1, along an angle (degrees, 90 = top to bottom). */
+    public static final class Gradient {
+        public int[] colors;
+        public float[] positions;
+        public float angle;
+        /** A path gradient (circle, rect, shape), drawn radially from centerX/centerY (0..1). */
+        public boolean radial;
+        public float centerX = 0.5f, centerY = 0.5f;
+
+        /** The colour that stands in where gradients are not drawn (stops weighted by opacity). */
+        public int average() {
+            long r = 0, g = 0, b = 0, w = 0;
+            for (int c : colors) {
+                int a = c >>> 24;
+                r += ((c >> 16) & 0xFF) * a;
+                g += ((c >> 8) & 0xFF) * a;
+                b += (c & 0xFF) * a;
+                w += a;
+            }
+            if (w == 0) return 0;
+            return 0xFF000000 | (int) (r / w) << 16 | (int) (g / w) << 8 | (int) (b / w);
+        }
+    }
+
+    /** Picture colour effects: none, greyscale (a:grayscl), black and white (a:biLevel). */
+    public static final int EFFECT_NONE = 0, EFFECT_GRAY = 1, EFFECT_BILEVEL = 2;
+
+    /** GEOM_PATH: the outline is {@link TextBox#path}. */
+    public static final int GEOM_RECT = 0, GEOM_ROUND_RECT = 1, GEOM_ELLIPSE = 2, GEOM_LINE = 3, GEOM_PATH = 4;
 
     /**
      * A floating text box: its own blocks inside an optional border. Slides use it for every shape,
@@ -175,9 +233,24 @@ public final class DocModel {
         public long borderWidthEmu;
         /** Fill colour (ARGB), 0 for none. */
         public int fill;
+        /** Gradient fill drawn instead of {@link #fill}, or null. */
+        public Gradient fillGradient;
         /** GEOM_*: the outline's shape. A line runs corner to corner, mirrored by flipH / flipV. */
         public int geometry = GEOM_RECT;
         public boolean flipH, flipV;
+        /**
+         * For GEOM_PATH: commands in fractions of the box, each an op (DrawingML.MOVE, LINE, CUBIC,
+         * QUAD, CLOSE) followed by its points.
+         */
+        public float[] path;
+        /** Clockwise rotation in degrees about the box's centre. */
+        public float rotation;
+        /** A line's arrowheads at its start (head) and end (tail). */
+        public boolean arrowHead, arrowTail;
+        /** STROKE_* of the outline (solid, dashed, dotted). */
+        public int dash;
+        /** Text that does not fit is cut at the box's bottom (Word text boxes; slides let it run). */
+        public boolean clipText;
         /** Text padding (left, top, right, bottom) in EMU, or null for Word's default. */
         public long[] insets;
         /** Vertical position of the text: CELL_TOP, CELL_CENTER or CELL_BOTTOM. */
@@ -208,6 +281,8 @@ public final class DocModel {
     }
 
     public static final int REL_PAGE = 0, REL_MARGIN = 1, REL_PARAGRAPH = 2;
+    /** The bottom (vertical) or right (horizontal) margin area, from the margin to the paper's edge. */
+    public static final int REL_FAR_MARGIN = 3;
 
     /** Forced page break (w:br type="page"). */
     public static final class PageBreak extends Block {
@@ -237,11 +312,27 @@ public final class DocModel {
         public String pageNumberFormat = "decimal";
         /** Header/footer content; null means "same as the previous section". */
         public List<Block> header, footer, firstHeader, firstFooter;
+        /** Even-page header/footer, used when the document has evenAndOddHeaders. */
+        public List<Block> evenHeader, evenFooter;
+        /**
+         * Page border (pgBorders) top, left, bottom, right, or null; {@link #pageBorderSpace} is
+         * each side's distance in points from the text (or from the page edge when
+         * {@link #pageBorderFromPage}); {@link #pageBorderDouble} draws two lines.
+         */
+        public Border[] pageBorders;
+        public int[] pageBorderSpace;
+        public boolean pageBorderFromPage, pageBorderDouble;
+        /** 0 all pages, 1 first page only, 2 all but the first. */
+        public int pageBorderPages;
         /** Text columns: widths and the gap after each (twips). One column when empty. */
         public int[] columnWidths = new int[0], columnGaps = new int[0];
         /** Page background colour (ARGB, 0 for white) and picture (zip entry, or null); for slides. */
         public int background;
         public String backgroundImage;
+        /** Opacity of {@link #backgroundImage}, over {@link #background}. */
+        public float backgroundAlpha = 1f;
+        /** Gradient background (drawn instead of {@link #background}), or null. */
+        public Gradient backgroundGradient;
     }
 
     /** A border line; {@link #NONE} hides an inherited border. Width in eighths of a point. */
@@ -250,6 +341,10 @@ public final class DocModel {
 
         public final int size;
         public final int color;
+        /** LINE_* style of the line. */
+        public int style;
+        /** Gap between a paragraph border and the text, in points. */
+        public int space;
 
         Border(int size, int color) {
             this.size = size;
@@ -274,6 +369,8 @@ public final class DocModel {
         public int vAlign = CELL_TOP;
         /** Top, left, bottom, right; null entries fall back to the table borders. */
         public final Border[] borders = new Border[4];
+        /** Own padding (top, left, bottom, right) in twips, -1 for the table's; null when none. */
+        public int[] margins;
     }
 
     public static final class Row {
@@ -284,6 +381,12 @@ public final class DocModel {
     }
 
     public static final int B_TOP = 0, B_LEFT = 1, B_BOTTOM = 2, B_RIGHT = 3, B_INSIDE_H = 4, B_INSIDE_V = 5;
+    /** Paragraph borders: the line between paragraphs that share their borders. */
+    public static final int B_BETWEEN = 4;
+
+    /** Line styles of borders and shape outlines. */
+    public static final int STROKE_SOLID = 0, STROKE_DOUBLE = 1, STROKE_THIN_THICK = 2, STROKE_THICK_THIN = 3,
+            STROKE_DASH = 4, STROKE_DOT = 5, STROKE_DASH_DOT = 6;
 
     public static final class Table extends Block {
         /** Column widths in twips from the table grid; may be empty. */
@@ -293,6 +396,13 @@ public final class DocModel {
         public final Border[] borders = new Border[6];
         public int indent;
         public int align = ALIGN_START;
+        /**
+         * A floating table (tblpPr): REL_PAGE or REL_MARGIN when it sits {@link #floatY} twips
+         * from the page or margin top, REL_PARAGRAPH for one placed with the text; -1 when not
+         * floating.
+         */
+        public int floatRel = -1;
+        public int floatY;
         /** Cell padding: top, left, bottom, right. */
         public final int[] cellMargin = {0, 108, 0, 108};
 
@@ -315,6 +425,8 @@ public final class DocModel {
         public final Section lastSection;
         /** Distance between default tab stops, in twips. */
         public final int defaultTab;
+        /** Even pages use the sections' even headers and footers. */
+        public boolean evenAndOddHeaders;
 
         Document(List<Block> blocks, int defaultHalfPoints, Section lastSection, int defaultTab) {
             this.blocks = blocks;

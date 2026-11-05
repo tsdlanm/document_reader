@@ -36,7 +36,7 @@ public final class FontMatch {
 
     /** True when the phone font has no such bold and it must be faked. */
     public static boolean fakeBold(String font, boolean bold, boolean italic) {
-        return bold && (typeface(font, bold, italic).getStyle() & Typeface.BOLD) == 0;
+        return PageLayout.Fonts.fakeBold(typeface(font, bold, italic), bold);
     }
 
     /** Horizontal text scale for {@code text}; 1 for fonts without width data. */

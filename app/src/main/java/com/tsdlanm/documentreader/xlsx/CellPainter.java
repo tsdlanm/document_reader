@@ -322,6 +322,8 @@ final class CellPainter {
             if (rowY[r + 1] - rowY[r] <= 0) continue;
             float t = cellTop(r), b = cellTop(r + 1);
             for (int c = c0; c <= c1; c++) {
+                // Hidden columns draw nothing, not even their borders.
+                if (colX[c + 1] - colX[c] <= 0) continue;
                 CellStyle st = data.style(r, c);
                 float l = cellLeft(c), rr = cellLeft(c + 1);
                 if (st.diagonals != 0) {
@@ -437,6 +439,7 @@ final class CellPainter {
     private void drawCellText(Canvas canvas, int r, int c, int lastVisibleCol, float textPx, float pad,
                               boolean merged) {
         if (!merged && visibleMergeAt(r, c) != null) return;
+        if (!merged && c < colX.length - 1 && colX[c + 1] - colX[c] <= 0) return;
         String s = data.text(r, c);
         if (s == null || s.isEmpty()) return;
         CellStyle st = data.style(r, c);
@@ -484,7 +487,11 @@ final class CellPainter {
             if (align == CellStyle.ALIGN_LEFT || align == CellStyle.ALIGN_CENTER) {
                 float reach = align == CellStyle.ALIGN_LEFT ? left + need : (left + right + need) / 2f;
                 int k = lastC + 1;
-                while (k < colX.length - 1 && k <= lastVisibleCol + 1 && !data.hasCell(r, k) && clipRight < reach) {
+                // Text in the frozen columns stops at the freeze line, as in Excel: otherwise it
+                // would show again in the scrolled part.
+                int stop = c < data.frozenCols ? data.frozenCols : Integer.MAX_VALUE;
+                while (k < colX.length - 1 && k <= lastVisibleCol + 1 && k < stop && !data.hasCell(r, k)
+                        && clipRight < reach) {
                     lastCol = k;
                     clipRight = cellLeft(++k);
                 }
@@ -492,7 +499,8 @@ final class CellPainter {
             if (align == CellStyle.ALIGN_RIGHT || align == CellStyle.ALIGN_CENTER) {
                 float reach = align == CellStyle.ALIGN_RIGHT ? right - need : (left + right - need) / 2f;
                 int k = c - 1;
-                while (k >= 0 && k >= c - MAX_SPILL && !data.hasCell(r, k) && clipLeft > reach) {
+                int stop = c >= data.frozenCols ? data.frozenCols : 0;
+                while (k >= stop && k >= c - MAX_SPILL && !data.hasCell(r, k) && clipLeft > reach) {
                     firstCol = k;
                     clipLeft = cellLeft(k--);
                 }
@@ -500,8 +508,19 @@ final class CellPainter {
             if (firstCol < c || lastCol > lastC) hideGridUnder(canvas, r, firstCol, lastCol, top, bottom, c, lastC);
         }
         if (number && tw > right - left - 2 * pad) {
-            // Excel shows #### when a number does not fit.
-            s = "###";
+            String fitted = null;
+            double v = data.number(r, c);
+            if (st.format.kind == NumberFormat.GENERAL && !Double.isNaN(v) && Math.abs(v) < 1e11) {
+                // A General number loses decimals until it fits, as in Excel.
+                int sep = Math.max(s.lastIndexOf(','), s.lastIndexOf('.'));
+                int shown = sep >= 0 && s.indexOf('E') < 0 ? s.length() - 1 - sep : 0;
+                for (int d = shown - 1; d >= 0 && fitted == null; d--) {
+                    String t = NumberFormat.generalRounded(v, d);
+                    if (t.length() < s.length() && text.measureText(t) <= right - left - 2 * pad) fitted = t;
+                }
+            }
+            // Otherwise Excel shows #### when a number does not fit.
+            s = fitted != null ? fitted : "###";
             tw = text.measureText(s);
         }
         float x;
@@ -547,6 +566,22 @@ final class CellPainter {
         }
     }
 
+    /** Words of {@code s} in lines no wider than {@code width} (a long word gets a line of its own). */
+    private java.util.List<String> wrapWords(String s, float width) {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        StringBuilder line = new StringBuilder();
+        for (String word : s.trim().split("\\s+")) {
+            if (line.length() > 0 && text.measureText(line + " " + word) > width) {
+                out.add(line.toString());
+                line.setLength(0);
+            }
+            if (line.length() > 0) line.append(' ');
+            line.append(word);
+        }
+        if (line.length() > 0) out.add(line.toString());
+        return out;
+    }
+
     /** Rotated text, or letters stacked top to bottom (rotation 255), centred in the cell. */
     private void drawRotated(Canvas canvas, String s, CellStyle st, float textPx,
                              float left, float top, float right, float bottom, float pad) {
@@ -572,10 +607,22 @@ final class CellPainter {
         } else {
             // 1..90: counter-clockwise; 91..180: clockwise by (rotation - 90).
             float deg = st.rotation <= 90 ? -st.rotation : st.rotation - 90;
-            float tw = text.measureText(s);
             canvas.translate((left + right) / 2f, (top + bottom) / 2f);
             canvas.rotate(deg);
-            canvas.drawText(s, -tw / 2f, -(metrics.ascent + metrics.descent) / 2f, text);
+            boolean upright = Math.abs(Math.abs(deg) - 90) < 0.5f;
+            if (st.wrap && upright) {
+                // Wrapped upright text: lines as long as the cell is tall, side by side, as Excel.
+                java.util.List<String> lines = wrapWords(s, bottom - top - 2 * pad);
+                float lineH = metrics.descent - metrics.ascent;
+                float y0 = -lineH * lines.size() / 2f - metrics.ascent;
+                for (int i = 0; i < lines.size(); i++) {
+                    String line = lines.get(i);
+                    canvas.drawText(line, -text.measureText(line) / 2f, y0 + i * lineH, text);
+                }
+            } else {
+                float tw = text.measureText(s);
+                canvas.drawText(s, -tw / 2f, -(metrics.ascent + metrics.descent) / 2f, text);
+            }
         }
         canvas.restore();
     }

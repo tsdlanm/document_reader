@@ -54,6 +54,20 @@ final class FontDownloads {
         return family == null ? null : FONTS.get(family + style(bold, italic));
     }
 
+    /**
+     * True when {@code face} is a downloaded bold. Typefaces from the font provider report style
+     * NORMAL even for weight 700, so asking {@link Typeface#getStyle} faked bold on top of bold.
+     */
+    static boolean isBold(Typeface face) {
+        for (Map.Entry<String, Typeface> e : FONTS.entrySet()) {
+            if (e.getValue() == face) {
+                char s = e.getKey().charAt(e.getKey().length() - 1);
+                return s == '1' || s == '3';
+            }
+        }
+        return false;
+    }
+
     /** True when {@code font} is drawn in a downloaded font with the original's widths. */
     static boolean exact(String font, boolean bold, boolean italic) {
         return get(font, bold, italic) != null;

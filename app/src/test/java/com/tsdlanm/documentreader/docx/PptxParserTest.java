@@ -188,7 +188,7 @@ public class PptxParserTest {
         assertEquals("2.", three.listPrefix);
         assertEquals(1080, two.indLeft);
         // accent1 (336699) at half lightness.
-        assertEquals(PptxParser.lum(0xFF336699, 0.5f, 0f), three.runs.get(0).color);
+        assertEquals(DrawingML.lum(0xFF336699, 0.5f, 0f), three.runs.get(0).color);
         assertEquals(20, three.runs.get(0).charSpacing);
     }
 

@@ -66,7 +66,14 @@ public final class DocxAdapter extends BaseAdapter {
         // Page and section breaks mean nothing in this flowing view.
         this.blocks = new ArrayList<>();
         for (Block b : doc.blocks) {
-            if (b instanceof Paragraph || b instanceof Image || b instanceof Table) blocks.add(b);
+            if (b instanceof Image) {
+                // Pictures sharing a line follow each other here.
+                // A spacer (no picture) holds room for shapes in the page view only.
+                if (((Image) b).part != null) blocks.add(b);
+                blocks.addAll(((Image) b).beside);
+            } else if (b instanceof Paragraph || b instanceof Table) {
+                blocks.add(b);
+            }
             // Text boxes simply follow in reading order.
             else if (b instanceof DocModel.TextBox) blocks.addAll(((DocModel.TextBox) b).blocks);
         }
@@ -201,6 +208,11 @@ public final class DocxAdapter extends BaseAdapter {
         SpannableStringBuilder sb = new SpannableStringBuilder();
         if (p.listPrefix != null) sb.append(p.listPrefix).append("  ");
         for (Run r : p.runs) {
+            // Pictures in the text are shown in the page view only.
+            if (r.image != null) {
+                sb.append(' ');
+                continue;
+            }
             int start = sb.length();
             sb.append(r.text);
             int end = sb.length();
@@ -357,6 +369,26 @@ public final class DocxAdapter extends BaseAdapter {
         return widths;
     }
 
+    /** A cell's blocks with nested tables read as their non-empty paragraphs, in order. */
+    private static List<Block> cellBlocks(List<Block> blocks) {
+        List<Block> out = new ArrayList<>();
+        for (Block b : blocks) {
+            if (b instanceof DocModel.Table) {
+                for (DocModel.Row row : ((DocModel.Table) b).rows) {
+                    for (Cell inner : row.cells) {
+                        for (Block x : cellBlocks(inner.blocks)) {
+                            if (x instanceof Paragraph && ((Paragraph) x).isEmpty()) continue;
+                            out.add(x);
+                        }
+                    }
+                }
+            } else {
+                out.add(b);
+            }
+        }
+        return out;
+    }
+
     private View buildCell(Cell c, int width, int line) {
         LinearLayout cell = new LinearLayout(context);
         cell.setOrientation(LinearLayout.VERTICAL);
@@ -368,15 +400,21 @@ public final class DocxAdapter extends BaseAdapter {
         cell.setBackground(bg);
         if (c.mergedContinue) return cell;
         int inner = Math.max(1, width - 2 * pad);
-        for (Block b : c.blocks) {
+        for (Block b : cellBlocks(c.blocks)) {
             if (b instanceof Paragraph) {
                 TextView tv = newTextView();
                 bindParagraph(tv, (Paragraph) b, 0.9f, false);
                 cell.addView(tv);
             } else if (b instanceof Image) {
-                ImageView iv = newImageView();
-                cell.addView(iv);
-                bindImage(iv, (Image) b, inner);
+                List<Image> row = new ArrayList<>();
+                row.add((Image) b);
+                row.addAll(((Image) b).beside);
+                for (Image img : row) {
+                    if (img.part == null) continue;
+                    ImageView iv = newImageView();
+                    cell.addView(iv);
+                    bindImage(iv, img, inner);
+                }
             }
         }
         return cell;

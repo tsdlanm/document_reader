@@ -1,5 +1,6 @@
 package com.tsdlanm.documentreader.docx;
 
+import com.tsdlanm.documentreader.util.SymbolFonts;
 import com.tsdlanm.documentreader.util.XmlUtil;
 
 import org.xmlpull.v1.XmlPullParser;
@@ -21,6 +22,8 @@ final class Numbering {
         int left = -1, hanging = -1;
         /** What follows the marker: tab, space or nothing. */
         String suffix = "tab";
+        /** Font of the marker (rPr), for symbol-font bullets. */
+        String font;
     }
 
     private final Map<String, Level[]> abstracts = new HashMap<>();
@@ -68,6 +71,13 @@ final class Numbering {
                     if (level != null) {
                         String v = XmlUtil.attr(p, "val");
                         level.text = v == null ? "" : v;
+                    }
+                    break;
+                case "rFonts":
+                    if (level != null) {
+                        String v = XmlUtil.attr(p, "ascii");
+                        if (v == null) v = XmlUtil.attr(p, "hAnsi");
+                        if (v != null) level.font = v;
                     }
                     break;
                 case "suff":
@@ -125,7 +135,11 @@ final class Numbering {
         Level[] levels = abs == null ? null : abstracts.get(abs);
         Level lvl = levels == null ? null : levels[ilvl];
         if (lvl == null) return BULLETS[ilvl % BULLETS.length];
-        if ("bullet".equals(lvl.format)) return BULLETS[ilvl % BULLETS.length];
+        if ("bullet".equals(lvl.format)) {
+            // The document's own marker ("-", "o", ➢...), symbol-font glyphs as Unicode.
+            String s = SymbolFonts.map(lvl.font, lvl.text).trim();
+            return s.isEmpty() ? BULLETS[ilvl % BULLETS.length] : s;
+        }
         if ("none".equals(lvl.format)) return null;
 
         int[] c = counters.get(numId);

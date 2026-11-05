@@ -13,6 +13,7 @@ import com.tsdlanm.documentreader.docx.DocModel.SectionBreak;
 import com.tsdlanm.documentreader.docx.DocModel.Table;
 import com.tsdlanm.documentreader.docx.DocModel.TextBox;
 import com.tsdlanm.documentreader.util.XmlFactory;
+import com.tsdlanm.documentreader.util.SymbolFonts;
 import com.tsdlanm.documentreader.util.XmlUtil;
 import com.tsdlanm.documentreader.util.ZipParts;
 
@@ -64,19 +65,28 @@ public final class PptxParser {
 
     /** Paragraph and character properties at one list level; null fields are inherited. */
     static final class Props {
-        Integer algn, marL, indent, lnPct, lnPts, befPts, befPct, aftPts, aftPct;
+        Integer algn, marL, marR, indent, lnPct, lnPts, befPts, befPct, aftPts, aftPct;
         /** 0 no bullet, 1 character, 2 automatic number. */
         Integer buType;
         String buChar, buFont, buAuto;
         Integer buStart;
+        /** Bullet colour (buClr; 0 = the text's) and size in thousandths of a percent (buSzPct). */
+        Integer buColor, buSize;
         Integer sz, color, baseline, spc;
         Boolean b, i, u, strike;
         String cap, latin;
+        /** Tab stops (a:tabLst): positions in EMU and TAB_* alignments; null when not set here. */
+        int[] tabPos, tabAlign;
 
         void over(Props o) {
             if (o == null) return;
             if (o.algn != null) algn = o.algn;
+            if (o.tabPos != null) {
+                tabPos = o.tabPos;
+                tabAlign = o.tabAlign;
+            }
             if (o.marL != null) marL = o.marL;
+            if (o.marR != null) marR = o.marR;
             if (o.indent != null) indent = o.indent;
             if (o.lnPct != null || o.lnPts != null) {
                 lnPct = o.lnPct;
@@ -97,6 +107,8 @@ public final class PptxParser {
                 if (o.buStart != null) buStart = o.buStart;
             }
             if (o.buFont != null) buFont = o.buFont;
+            if (o.buColor != null) buColor = o.buColor;
+            if (o.buSize != null) buSize = o.buSize;
             overRun(o);
         }
 
@@ -143,8 +155,15 @@ public final class PptxParser {
         boolean flipH, flipV;
         /** GEOM_* or -1 when not given. */
         int geometry = -1;
+        /** Outline for GEOM_PATH (see {@link DocModel.TextBox#path}). */
+        float[] path;
+        /** Clockwise rotation in degrees. */
+        float rotation;
+        boolean arrowHead, arrowTail;
         /** Fill and outline colour: null unset, 0 none. */
         Integer fill, line;
+        /** Gradient fill, with {@link #fill} its average colour; null for none. */
+        DocModel.Gradient gradient;
         long lineWidth = -1;
         Long[] insets = new Long[4];
         Integer anchor;
@@ -155,8 +174,12 @@ public final class PptxParser {
         /** Text colour from the shape's style (fontRef). */
         Integer styleText;
         String picture;
+        /** The fill comes from a fill overlay effect, which covers the picture fill. */
+        boolean overlay;
         /** Picture crop (see {@link DocModel.Image#crop}), or null. */
         float[] crop;
+        /** Picture opacity and colour effect, see blipPart. */
+        final float[] effects = {1f, DocModel.EFFECT_NONE};
         Table table;
         boolean chart;
     }
@@ -165,6 +188,9 @@ public final class PptxParser {
     static final class Background {
         int color;
         String picture;
+        DocModel.Gradient gradient;
+        /** Opacity of the picture (a:alphaModFix); white shows through, as in PowerPoint. */
+        float alpha = 1f;
     }
 
     static final class Master {
@@ -263,7 +289,10 @@ public final class PptxParser {
         Background b = bg[0] != null ? bg[0] : layout.background != null ? layout.background : master.background;
         if (b != null) {
             sec.background = b.color;
+            sec.backgroundGradient = b.gradient;
             sec.backgroundImage = b.picture;
+            sec.backgroundAlpha = b.alpha;
+            if (b.picture != null && b.alpha < 1f && b.color == 0) sec.background = 0xFFFFFFFF;
         }
         if (showMaster && layout.showMasterShapes) {
             for (Shape s : master.shapes) if (!s.placeholder) emit(s, null, null, master, out);
@@ -482,7 +511,12 @@ public final class PptxParser {
                 while (XmlUtil.nextChild(p, d2)) {
                     String f = p.getName();
                     if ("blipFill".equals(f)) {
-                        b.picture = blipPart(p, ctx, null);
+                        float[] fx = new float[2];
+                        b.picture = blipPart(p, ctx, null, fx);
+                        b.alpha = fx[0];
+                    } else if ("gradFill".equals(f)) {
+                        b.gradient = DrawingML.readGradient(p, name -> scheme(ctx.master, name));
+                        if (b.gradient != null) b.color = b.gradient.average();
                     } else {
                         Integer c = readFill(p, ctx);
                         if (c != null) b.color = c;
@@ -676,7 +710,7 @@ public final class PptxParser {
                     break;
                 case "blipFill":
                     s.crop = new float[4];
-                    s.picture = blipPart(p, ctx, s.crop);
+                    s.picture = blipPart(p, ctx, s.crop, s.effects);
                     break;
                 case "graphic":
                     readGraphic(p, ctx, s);
@@ -721,32 +755,88 @@ public final class PptxParser {
                 case "xfrm":
                     readXfrm(p, s);
                     break;
-                case "prstGeom":
-                    s.geometry = geometry(XmlUtil.attr(p, "prst"));
+                case "prstGeom": {
+                    String prst = XmlUtil.attr(p, "prst");
+                    s.geometry = DrawingML.geometry(prst);
+                    s.path = s.geometry == DocModel.GEOM_PATH ? DrawingML.presetPath(prst) : null;
                     XmlUtil.skip(p);
                     break;
-                case "custGeom":
-                    if (s.geometry < 0) s.geometry = DocModel.GEOM_RECT;
-                    XmlUtil.skip(p);
+                }
+                case "custGeom": {
+                    float[] path = DrawingML.readCustGeom(p);
+                    if (path != null) {
+                        s.geometry = DocModel.GEOM_PATH;
+                        s.path = path;
+                    } else if (s.geometry < 0) {
+                        s.geometry = DocModel.GEOM_RECT;
+                    }
                     break;
+                }
                 case "blipFill":
                     // A shape filled with a picture (common in Canva exports): drawn as the picture.
                     s.crop = new float[4];
-                    s.picture = blipPart(p, ctx, s.crop);
+                    s.picture = blipPart(p, ctx, s.crop, s.effects);
                     break;
                 case "ln": {
                     long w = attrLong(p, "w", -1);
                     if (w >= 0) s.lineWidth = w;
                     int d2 = p.getDepth();
                     while (XmlUtil.nextChild(p, d2)) {
+                        String ln = p.getName();
+                        if ("headEnd".equals(ln) || "tailEnd".equals(ln)) {
+                            String type = XmlUtil.attr(p, "type");
+                            boolean arrow = type != null && !"none".equals(type);
+                            if ("headEnd".equals(ln)) s.arrowHead = arrow;
+                            else s.arrowTail = arrow;
+                            XmlUtil.skip(p);
+                            continue;
+                        }
                         Integer c = readFill(p, ctx);
                         if (c != null) s.line = c;
                     }
                     break;
                 }
+                case "gradFill": {
+                    s.gradient = DrawingML.readGradient(p, name -> scheme(ctx.master, name));
+                    s.fill = s.gradient != null ? s.gradient.average() : 0;
+                    break;
+                }
+                case "effectLst": {
+                    // A fill overlay colours the shape's own fill (a texture tinted by a gradient):
+                    // the overlay is what shows, so it stands in for a picture fill.
+                    int d2 = p.getDepth();
+                    while (XmlUtil.nextChild(p, d2)) {
+                        if (!"fillOverlay".equals(p.getName())) {
+                            XmlUtil.skip(p);
+                            continue;
+                        }
+                        int d3 = p.getDepth();
+                        while (XmlUtil.nextChild(p, d3)) {
+                            if ("gradFill".equals(p.getName())) {
+                                DocModel.Gradient g = DrawingML.readGradient(p, name -> scheme(ctx.master, name));
+                                if (g != null) {
+                                    s.gradient = g;
+                                    s.fill = g.average();
+                                    s.overlay = true;
+                                }
+                            } else {
+                                Integer c = readFill(p, ctx);
+                                if (c != null && c != 0) {
+                                    s.fill = c;
+                                    s.gradient = null;
+                                    s.overlay = true;
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
                 default: {
                     Integer c = readFill(p, ctx);
-                    if (c != null) s.fill = c;
+                    if (c != null) {
+                        s.fill = c;
+                        s.gradient = null;
+                    }
                 }
             }
         }
@@ -755,6 +845,7 @@ public final class PptxParser {
     private static void readXfrm(XmlPullParser p, Shape s) throws XmlPullParserException, IOException {
         s.flipH = "1".equals(XmlUtil.attr(p, "flipH"));
         s.flipV = "1".equals(XmlUtil.attr(p, "flipV"));
+        s.rotation = XmlUtil.parseInt(XmlUtil.attr(p, "rot"), 0) / 60000f;
         int d = p.getDepth();
         while (XmlUtil.nextChild(p, d)) {
             if ("off".equals(p.getName())) {
@@ -767,30 +858,6 @@ public final class PptxParser {
                 s.hasXfrm = true;
             }
             XmlUtil.skip(p);
-        }
-    }
-
-    private static int geometry(String prst) {
-        if (prst == null) return DocModel.GEOM_RECT;
-        switch (prst) {
-            case "roundRect":
-            case "round1Rect":
-            case "round2SameRect":
-            case "snipRoundRect":
-            case "flowChartAlternateProcess":
-                return DocModel.GEOM_ROUND_RECT;
-            case "ellipse":
-            case "flowChartConnector":
-            case "donut":
-                return DocModel.GEOM_ELLIPSE;
-            case "line":
-            case "straightConnector1":
-            case "bentConnector2":
-            case "bentConnector3":
-            case "curvedConnector3":
-                return DocModel.GEOM_LINE;
-            default:
-                return DocModel.GEOM_RECT;
         }
     }
 
@@ -828,6 +895,12 @@ public final class PptxParser {
                     s.table = readTable(p, ctx);
                     continue;
                 }
+                if ("blipFill".equals(n) && s.picture == null) {
+                    // An embedded object (equation, chart object) carries a preview picture.
+                    s.crop = new float[4];
+                    s.picture = blipPart(p, ctx, s.crop, s.effects);
+                    continue;
+                }
                 if ("chart".equals(n) || "relIds".equals(n) || "oleObj".equals(n)) s.chart = true;
                 depth++;
             } else if (e == XmlPullParser.END_TAG) {
@@ -836,6 +909,7 @@ public final class PptxParser {
                 break;
             }
         }
+        if (s.picture != null) s.chart = false;
     }
 
     // ================================================================ text
@@ -965,6 +1039,8 @@ public final class PptxParser {
         }
         String marL = XmlUtil.attr(p, "marL");
         if (marL != null) pr.marL = XmlUtil.parseInt(marL, 0);
+        String marR = XmlUtil.attr(p, "marR");
+        if (marR != null) pr.marR = XmlUtil.parseInt(marR, 0);
         String indent = XmlUtil.attr(p, "indent");
         if (indent != null) pr.indent = XmlUtil.parseInt(indent, 0);
         int d = p.getDepth();
@@ -993,6 +1069,27 @@ public final class PptxParser {
                     }
                     break;
                 }
+                case "tabLst": {
+                    List<int[]> tabs = new ArrayList<>();
+                    int d2 = p.getDepth();
+                    while (XmlUtil.nextChild(p, d2)) {
+                        if ("tab".equals(p.getName())) {
+                            String a = XmlUtil.attr(p, "algn");
+                            int al = "r".equals(a) ? DocModel.TAB_RIGHT : "ctr".equals(a) ? DocModel.TAB_CENTER
+                                    : DocModel.TAB_LEFT;
+                            tabs.add(new int[]{(int) attrLong(p, "pos", 0), al});
+                        }
+                        XmlUtil.skip(p);
+                    }
+                    java.util.Collections.sort(tabs, (x, y) -> Integer.compare(x[0], y[0]));
+                    pr.tabPos = new int[tabs.size()];
+                    pr.tabAlign = new int[tabs.size()];
+                    for (int k = 0; k < tabs.size(); k++) {
+                        pr.tabPos[k] = tabs.get(k)[0];
+                        pr.tabAlign[k] = tabs.get(k)[1];
+                    }
+                    break;
+                }
                 case "buNone":
                     pr.buType = 0;
                     XmlUtil.skip(p);
@@ -1010,6 +1107,26 @@ public final class PptxParser {
                     break;
                 case "buFont":
                     pr.buFont = XmlUtil.attr(p, "typeface");
+                    XmlUtil.skip(p);
+                    break;
+                case "buClr": {
+                    int d2 = p.getDepth();
+                    while (XmlUtil.nextChild(p, d2)) {
+                        int c = readColor(p, ctx);
+                        if (c != 0) pr.buColor = c;
+                    }
+                    break;
+                }
+                case "buSzPct":
+                    pr.buSize = XmlUtil.intAttr(p, "val", 100000);
+                    XmlUtil.skip(p);
+                    break;
+                case "buClrTx":
+                    pr.buColor = 0;
+                    XmlUtil.skip(p);
+                    break;
+                case "buSzTx":
+                    pr.buSize = 100000;
                     XmlUtil.skip(p);
                     break;
                 case "defRPr":
@@ -1056,204 +1173,25 @@ public final class PptxParser {
 
     // ============================================================== colours
 
-    /**
-     * A fill element (solidFill, gradFill, pattFill, noFill). Returns its colour, 0 for no fill, or
-     * null (element skipped) for anything else.
-     */
+    /** A fill element; see {@link DrawingML#readFill}. */
     private Integer readFill(XmlPullParser p, Ctx ctx) throws XmlPullParserException, IOException {
-        String n = p.getName();
-        switch (n) {
-            case "noFill":
-                XmlUtil.skip(p);
-                return 0;
-            case "solidFill": {
-                int c = 0;
-                int d = p.getDepth();
-                while (XmlUtil.nextChild(p, d)) c = readColor(p, ctx);
-                return c;
-            }
-            case "gradFill": {
-                // No gradients: the first stop's colour stands in.
-                int c = 0;
-                boolean found = false;
-                int depth = 1;
-                while (depth > 0) {
-                    int e = p.next();
-                    if (e == XmlPullParser.START_TAG) {
-                        if (!found && "gs".equals(p.getName())) {
-                            int d2 = p.getDepth();
-                            while (XmlUtil.nextChild(p, d2)) c = readColor(p, ctx);
-                            found = true;
-                            continue;
-                        }
-                        depth++;
-                    } else if (e == XmlPullParser.END_TAG) {
-                        depth--;
-                    } else if (e == XmlPullParser.END_DOCUMENT) {
-                        break;
-                    }
-                }
-                return c;
-            }
-            case "pattFill": {
-                int c = 0;
-                int d = p.getDepth();
-                while (XmlUtil.nextChild(p, d)) {
-                    boolean fg = "fgClr".equals(p.getName());
-                    int d2 = p.getDepth();
-                    int v = 0;
-                    while (XmlUtil.nextChild(p, d2)) v = readColor(p, ctx);
-                    if (fg) c = v;
-                }
-                return c;
-            }
-            default:
-                XmlUtil.skip(p);
-                return null;
-        }
+        return DrawingML.readFill(p, name -> scheme(ctx.master, name));
     }
 
-    /** A colour element with its modifiers; 0 when unknown or fully transparent. */
+    /** A colour element with its modifiers; see {@link DrawingML#readColor}. */
     private int readColor(XmlPullParser p, Ctx ctx) throws XmlPullParserException, IOException {
-        String n = p.getName();
-        int c;
-        switch (n) {
-            case "srgbClr":
-                c = XmlUtil.hexColor(XmlUtil.attr(p, "val"));
-                break;
-            case "sysClr":
-                c = XmlUtil.hexColor(XmlUtil.attr(p, "lastClr"));
-                if (c == 0) c = "window".equals(XmlUtil.attr(p, "val")) ? 0xFFFFFFFF : 0xFF000000;
-                break;
-            case "schemeClr":
-                c = scheme(ctx.master, XmlUtil.attr(p, "val"));
-                break;
-            case "prstClr":
-                c = preset(XmlUtil.attr(p, "val"));
-                break;
-            case "scrgbClr":
-                c = 0xFF000000 | (pct255(p, "r") << 16) | (pct255(p, "g") << 8) | pct255(p, "b");
-                break;
-            default:
-                XmlUtil.skip(p);
-                return 0;
-        }
-        int d = p.getDepth();
-        while (XmlUtil.nextChild(p, d)) {
-            String m = p.getName();
-            int v = XmlUtil.intAttr(p, "val", 100000);
-            XmlUtil.skip(p);
-            if (c == 0) continue;
-            switch (m) {
-                case "lumMod":
-                    c = lum(c, v / 100000f, 0f);
-                    break;
-                case "lumOff":
-                    c = lum(c, 1f, v / 100000f);
-                    break;
-                case "tint":
-                    c = mix(c, 0xFFFFFFFF, 1f - v / 100000f);
-                    break;
-                case "shade":
-                    c = mix(c, 0xFF000000, 1f - v / 100000f);
-                    break;
-                case "alpha":
-                    // Mostly transparent colours are treated as no colour.
-                    if (v < 15000) c = 0;
-                    break;
-                default:
-                    break;
-            }
-        }
-        return c;
-    }
-
-    private static int pct255(XmlPullParser p, String name) {
-        long v = attrLong(p, name, 0);
-        return (int) Math.max(0, Math.min(255, Math.round(v / 100000.0 * 255)));
+        return DrawingML.readColor(p, name -> scheme(ctx.master, name));
     }
 
     private static int scheme(Master m, String name) {
         if (name == null) return 0;
         String mapped = m.clrMap.get(name);
         Integer c = m.scheme.get(mapped != null ? mapped : name);
-        if (c != null) return c;
-        switch (mapped != null ? mapped : name) {
-            case "lt1":
-                return 0xFFFFFFFF;
-            case "dk1":
-                return 0xFF000000;
-            case "lt2":
-                return 0xFFE7E6E6;
-            case "dk2":
-                return 0xFF44546A;
-            default:
-                return 0xFF4472C4;
-        }
-    }
-
-    private static int preset(String v) {
-        if (v == null) return 0;
-        switch (v) {
-            case "white":
-                return 0xFFFFFFFF;
-            case "red":
-                return 0xFFFF0000;
-            case "green":
-                return 0xFF008000;
-            case "blue":
-                return 0xFF0000FF;
-            case "yellow":
-                return 0xFFFFFF00;
-            case "gray":
-            case "grey":
-                return 0xFF808080;
-            default:
-                return 0xFF000000;
-        }
-    }
-
-    /** Scales and shifts the HSL lightness, as DrawingML's lumMod / lumOff. */
-    static int lum(int c, float mod, float off) {
-        float r = ((c >> 16) & 0xFF) / 255f, g = ((c >> 8) & 0xFF) / 255f, b = (c & 0xFF) / 255f;
-        float max = Math.max(r, Math.max(g, b)), min = Math.min(r, Math.min(g, b));
-        float l = (max + min) / 2f, h = 0f, s = 0f;
-        if (max != min) {
-            float dd = max - min;
-            s = l > 0.5f ? dd / (2f - max - min) : dd / (max + min);
-            if (max == r) h = (g - b) / dd + (g < b ? 6 : 0);
-            else if (max == g) h = (b - r) / dd + 2;
-            else h = (r - g) / dd + 4;
-            h /= 6f;
-        }
-        l = Math.max(0f, Math.min(1f, l * mod + off));
-        float rr, gg, bb;
-        if (s == 0) {
-            rr = gg = bb = l;
-        } else {
-            float q = l < 0.5f ? l * (1 + s) : l + s - l * s;
-            float pp = 2 * l - q;
-            rr = hue(pp, q, h + 1f / 3);
-            gg = hue(pp, q, h);
-            bb = hue(pp, q, h - 1f / 3);
-        }
-        return 0xFF000000 | (Math.round(rr * 255) << 16) | (Math.round(gg * 255) << 8) | Math.round(bb * 255);
-    }
-
-    private static float hue(float p, float q, float t) {
-        if (t < 0) t += 1;
-        if (t > 1) t -= 1;
-        if (t < 1f / 6) return p + (q - p) * 6 * t;
-        if (t < 1f / 2) return q;
-        if (t < 2f / 3) return p + (q - p) * (2f / 3 - t) * 6;
-        return p;
+        return c != null ? c : DrawingML.defaultScheme(mapped != null ? mapped : name);
     }
 
     private static int mix(int c, int with, float amount) {
-        int r = Math.round(((c >> 16) & 0xFF) * (1 - amount) + ((with >> 16) & 0xFF) * amount);
-        int g = Math.round(((c >> 8) & 0xFF) * (1 - amount) + ((with >> 8) & 0xFF) * amount);
-        int b = Math.round((c & 0xFF) * (1 - amount) + (with & 0xFF) * amount);
-        return 0xFF000000 | (r << 16) | (g << 8) | b;
+        return DrawingML.mix(c, with, amount);
     }
 
     /**
@@ -1262,9 +1200,19 @@ public final class PptxParser {
      * (negative insets) stretches it past the shape, whose outline then cuts it.
      */
     private static String blipPart(XmlPullParser p, Ctx ctx, float[] crop) throws XmlPullParserException, IOException {
+        return blipPart(p, ctx, crop, null);
+    }
+
+    /** {@code effects}, when given, receives {opacity, DocModel.EFFECT_*}. */
+    private static String blipPart(XmlPullParser p, Ctx ctx, float[] crop, float[] effects)
+            throws XmlPullParserException, IOException {
         String embed = null;
         float[] src = new float[4], fill = new float[4];
         String[] sides = {"l", "t", "r", "b"};
+        if (effects != null) {
+            effects[0] = 1f;
+            effects[1] = DocModel.EFFECT_NONE;
+        }
         int depth = 1;
         while (depth > 0) {
             int e = p.next();
@@ -1273,6 +1221,12 @@ public final class PptxParser {
                 String n = p.getName();
                 if (embed == null && "blip".equals(n)) {
                     embed = XmlUtil.attr(p, "embed");
+                } else if (effects != null && "alphaModFix".equals(n)) {
+                    effects[0] = Math.max(0f, Math.min(1f, attrLong(p, "amt", 100000) / 100000f));
+                } else if (effects != null && "grayscl".equals(n)) {
+                    effects[1] = Math.max(effects[1], DocModel.EFFECT_GRAY);
+                } else if (effects != null && "biLevel".equals(n)) {
+                    effects[1] = DocModel.EFFECT_BILEVEL;
                 } else if ("srcRect".equals(n) || "fillRect".equals(n)) {
                     float[] t = "srcRect".equals(n) ? src : fill;
                     for (int i = 0; i < 4; i++) t[i] = attrLong(p, sides[i], 0) / 100000f;
@@ -1482,7 +1436,7 @@ public final class PptxParser {
         if (geo == null || geo.cx < 0 || geo.cy < 0) return;
         long w = geo.cx, h = geo.cy;
 
-        if (s.picture != null) {
+        if (s.picture != null && !s.overlay) {
             if (w <= 0 || h <= 0) return;
             Image img = new Image(s.picture, w, h);
             float[] c = s.crop;
@@ -1490,13 +1444,17 @@ public final class PptxParser {
                     && c[0] + c[2] < 0.98f && c[1] + c[3] < 0.98f) {
                 img.crop = c;
             }
+            img.alpha = s.effects[0];
+            img.effect = (int) s.effects[1];
             place(img, geo);
             out.add(img);
             return;
         }
 
-        int geometry = s.geometry >= 0 ? s.geometry : lph != null && lph.geometry >= 0 ? lph.geometry
-                : mph != null && mph.geometry >= 0 ? mph.geometry : DocModel.GEOM_RECT;
+        Shape geoSrc = s.geometry >= 0 ? s : lph != null && lph.geometry >= 0 ? lph
+                : mph != null && mph.geometry >= 0 ? mph : null;
+        int geometry = geoSrc != null ? geoSrc.geometry : DocModel.GEOM_RECT;
+        if (geometry == DocModel.GEOM_PATH && geoSrc.path == null) geometry = DocModel.GEOM_RECT;
         List<Block> blocks = new ArrayList<>();
         if (s.table != null) {
             blocks.add(s.table);
@@ -1536,8 +1494,15 @@ public final class PptxParser {
 
         TextBox tb = new TextBox(blocks, w, h);
         tb.geometry = geometry;
+        if (geometry == DocModel.GEOM_PATH) tb.path = geoSrc.path;
+        // The gradient goes with the fill it came from (the shape's own, or its placeholder's).
+        Shape fillSrc = s.fill != null ? s : lph != null && lph.fill != null ? lph : mph;
+        if (fillSrc != null && fill != null && fill != 0) tb.fillGradient = fillSrc.gradient;
         tb.flipH = geo.flipH;
         tb.flipV = geo.flipV;
+        tb.rotation = geo.rotation;
+        tb.arrowHead = s.arrowHead;
+        tb.arrowTail = s.arrowTail;
         tb.fill = fill != null ? fill : 0;
         tb.border = line != null ? line : 0;
         long lw = s.lineWidth >= 0 ? s.lineWidth : lph != null && lph.lineWidth >= 0 ? lph.lineWidth
@@ -1604,7 +1569,18 @@ public final class PptxParser {
             Paragraph p = new Paragraph();
             p.align = pr.algn != null ? pr.algn : DocModel.ALIGN_START;
             p.indLeft = (pr.marL != null ? pr.marL : 0) / EMU_PER_TWIP;
+            p.indRight = (pr.marR != null ? pr.marR : 0) / EMU_PER_TWIP;
             p.firstLine = (pr.indent != null ? pr.indent : 0) / EMU_PER_TWIP;
+            if (pr.tabPos != null && pr.tabPos.length > 0) {
+                int n = pr.tabPos.length;
+                p.tabs = new int[n];
+                p.tabAligns = new int[n];
+                p.tabLeaders = new char[n];
+                for (int k = 0; k < n; k++) {
+                    p.tabs[k] = pr.tabPos[k] / EMU_PER_TWIP;
+                    p.tabAligns[k] = pr.tabAlign[k];
+                }
+            }
             int baseSize = pr.sz != null ? pr.sz : DEFAULT_SIZE;
             float sizePt = baseSize / 100f * scale;
             if (pr.lnPts != null) {
@@ -1644,8 +1620,20 @@ public final class PptxParser {
                 rp.overRun(tr.props);
                 Run r = run(rp, scale, m);
                 if (tr.slideNumber) r.pageNumber = true;
-                r.text.append(tr.text);
+                if (SymbolFonts.isSymbolFont(r.font) || hasPrivateUse(tr.text)) {
+                    r.text.append(SymbolFonts.map(r.font, tr.text));
+                    if (SymbolFonts.isSymbolFont(r.font)) r.font = null;
+                } else {
+                    r.text.append(tr.text);
+                }
                 p.runs.add(r);
+            }
+            if (p.listPrefix != null && !p.runs.isEmpty()) {
+                // The bullet takes the first run's colour and size unless it has its own.
+                Run first = p.runs.get(0);
+                p.listColor = pr.buColor != null && pr.buColor != 0 ? pr.buColor : first.color;
+                int pct = pr.buSize != null ? pr.buSize : 100000;
+                p.listHalfPoints = Math.max(2, Math.round(first.halfPoints * pct / 100000f));
             }
             Props end = new Props();
             end.overRun(pr);
@@ -1658,6 +1646,14 @@ public final class PptxParser {
         // A placeholder with no text of its own shows nothing (its prompt text is not printed).
         if (!any) out.clear();
         return out;
+    }
+
+    static boolean hasPrivateUse(CharSequence s) {
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c >= 0xF020 && c <= 0xF0FF) return true;
+        }
+        return false;
     }
 
     private static Run run(Props rp, float scale, Master m) {
@@ -1697,28 +1693,8 @@ public final class PptxParser {
     /** Symbol-font bullets drawn with ordinary characters. */
     private static String bullet(String ch, String font) {
         if (ch == null || ch.isEmpty()) return "•";
-        String f = font == null ? "" : font.toLowerCase(java.util.Locale.ROOT);
-        if (f.contains("wingdings") || f.contains("symbol")) {
-            switch (ch.charAt(0)) {
-                case '§':
-                case 'n':
-                    return "▪";
-                case 'Ø':
-                    return "➢";
-                case 'ü':
-                    return "✓";
-                case 'q':
-                case 'o':
-                    return "□";
-                case 'v':
-                    return "❖";
-                case 'l':
-                    return "●";
-                default:
-                    return "•";
-            }
-        }
-        return ch;
+        String s = SymbolFonts.map(font, ch).trim();
+        return s.isEmpty() ? "•" : s;
     }
 
     private static String autoNumber(String type, int n) {
