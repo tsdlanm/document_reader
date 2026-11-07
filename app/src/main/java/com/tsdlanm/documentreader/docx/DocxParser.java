@@ -87,7 +87,7 @@ public final class DocxParser {
         Integer shading;
         /** Paragraph borders by B_* side (null entries: not set here). */
         Border[] borders;
-        Boolean contextual, pageBreakBefore, keepNext;
+        Boolean contextual, pageBreakBefore, keepNext, bidi;
         String numId;
         /** Tab stops as {position, alignment or -1 if cleared, leader char}. */
         List<int[]> tabs;
@@ -113,6 +113,7 @@ public final class DocxParser {
             if (o.contextual != null) contextual = o.contextual;
             if (o.pageBreakBefore != null) pageBreakBefore = o.pageBreakBefore;
             if (o.keepNext != null) keepNext = o.keepNext;
+            if (o.bidi != null) bidi = o.bidi;
             if (o.numId != null) numId = o.numId;
             if (o.tabs != null) {
                 if (tabs == null) tabs = new ArrayList<>();
@@ -776,6 +777,10 @@ public final class DocxParser {
                     out.keepNext = XmlUtil.toggle(p);
                     XmlUtil.skip(p);
                     break;
+                case "bidi":
+                    out.bidi = XmlUtil.toggle(p);
+                    XmlUtil.skip(p);
+                    break;
                 case "pBdr": {
                     if (out.borders == null) out.borders = new Border[5];
                     int d2 = p.getDepth();
@@ -1216,6 +1221,7 @@ public final class DocxParser {
         para.styleId = styleId;
         para.heading = headingLevel(styleId, eff);
         para.align = eff.align != null ? eff.align : DocModel.ALIGN_START;
+        para.rtl = eff.bidi != null && eff.bidi;
         para.indLeft = eff.indLeft != null ? eff.indLeft : 0;
         para.indRight = eff.indRight != null ? eff.indRight : 0;
         para.firstLine = eff.firstLine != null ? eff.firstLine : 0;

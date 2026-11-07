@@ -30,6 +30,11 @@ public final class DocModel {
     public static final class Paragraph extends Block {
         public final List<Run> runs = new ArrayList<>();
         public int align = ALIGN_START;
+        /**
+         * Right-to-left paragraph (w:bidi): it starts at the right, and ALIGN_START/ALIGN_END are the
+         * right/left edge. Otherwise left-to-right, whatever script the text is in, as in Word.
+         */
+        public boolean rtl;
         public int indLeft, indRight;
         /** First-line indent; negative for a hanging indent. */
         public int firstLine;
@@ -81,6 +86,7 @@ public final class DocModel {
         Paragraph continuation() {
             Paragraph p = new Paragraph();
             p.align = align;
+            p.rtl = rtl;
             p.indLeft = indLeft;
             p.indRight = indRight;
             p.spaceAfter = spaceAfter;

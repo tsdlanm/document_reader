@@ -1206,6 +1206,7 @@ public final class PageLayout {
         /** Laid out justified (a justified paragraph without tabs). */
         boolean justify;
         Layout.Alignment align;
+        boolean rtl;
 
         ParaBox(Paragraph para) {
             this.para = para;
@@ -1481,7 +1482,7 @@ public final class PageLayout {
             CharSequence tailText = sb.subSequence(lastTab + 1, sb.length());
             float stop = tw(p.tabs[tabIndex]) - origin;
             Layout tail = build(tailText, paint, Math.max(1, (int) Math.ceil(Layout.getDesiredWidth(tailText, paint))),
-                    Layout.Alignment.ALIGN_NORMAL, false);
+                    Layout.Alignment.ALIGN_NORMAL, false, false);
             float tailW = tail.getLineWidth(0);
             sb.delete(lastTab, sb.length());
             box.tail = new Tail(tail, stop, p.tabLeaders[tabIndex]);
@@ -1518,7 +1519,8 @@ public final class PageLayout {
 
         Layout.Alignment align = p.align == DocModel.ALIGN_CENTER ? Layout.Alignment.ALIGN_CENTER
                 : p.align == DocModel.ALIGN_END ? Layout.Alignment.ALIGN_OPPOSITE : Layout.Alignment.ALIGN_NORMAL;
-        box.layout = build(sb, paint, (int) layoutWidth, align, box.justify);
+        box.rtl = p.rtl;
+        box.layout = build(sb, paint, (int) layoutWidth, align, box.justify, box.rtl);
         box.text = sb;
         box.firstMargin = firstMargin;
         box.restMargin = restMargin;
@@ -1662,10 +1664,20 @@ public final class PageLayout {
         return -1;
     }
 
+    /**
+     * Paragraph direction as Word sets it: left-to-right unless the paragraph is marked w:bidi. Left
+     * to Android it follows the first letter, so a paragraph that starts with Arabic turned right to
+     * left, and "right aligned" (ALIGN_OPPOSITE) then ended up on the left.
+     */
+    private static android.text.TextDirectionHeuristic direction(boolean rtl) {
+        return rtl ? android.text.TextDirectionHeuristics.RTL : android.text.TextDirectionHeuristics.LTR;
+    }
+
     private static Layout build(CharSequence text, TextPaint paint, int width, Layout.Alignment align,
-                                boolean justify) {
+                                boolean justify, boolean rtl) {
         // Simple (greedy) breaking without hyphenation, as Word does.
         StaticLayout.Builder b = StaticLayout.Builder.obtain(text, 0, text.length(), paint, Math.max(1, width))
+                .setTextDirection(direction(rtl))
                 .setAlignment(align)
                 .setLineSpacing(0f, 1f)
                 .setIncludePad(false)
@@ -1680,6 +1692,7 @@ public final class PageLayout {
     static Layout buildIndented(ParaBox box, int[] left, int[] right) {
         StaticLayout.Builder b = StaticLayout.Builder.obtain(box.text, 0, box.text.length(), box.paint,
                         Math.max(1, box.layoutWidth))
+                .setTextDirection(direction(box.rtl))
                 .setAlignment(box.align)
                 .setLineSpacing(0f, 1f)
                 .setIncludePad(false)

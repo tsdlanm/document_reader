@@ -74,6 +74,8 @@ public final class PptxParser {
         Integer buColor, buSize;
         Integer sz, color, baseline, spc;
         Boolean b, i, u, strike;
+        /** rtl="1": a right-to-left paragraph. */
+        Boolean rtl;
         String cap, latin;
         /** Tab stops (a:tabLst): positions in EMU and TAB_* alignments; null when not set here. */
         int[] tabPos, tabAlign;
@@ -81,6 +83,7 @@ public final class PptxParser {
         void over(Props o) {
             if (o == null) return;
             if (o.algn != null) algn = o.algn;
+            if (o.rtl != null) rtl = o.rtl;
             if (o.tabPos != null) {
                 tabPos = o.tabPos;
                 tabAlign = o.tabAlign;
@@ -1037,6 +1040,8 @@ public final class PptxParser {
                     pr.algn = DocModel.ALIGN_START;
             }
         }
+        String rtl = XmlUtil.attr(p, "rtl");
+        if (rtl != null) pr.rtl = "1".equals(rtl) || "true".equals(rtl);
         String marL = XmlUtil.attr(p, "marL");
         if (marL != null) pr.marL = XmlUtil.parseInt(marL, 0);
         String marR = XmlUtil.attr(p, "marR");
@@ -1568,6 +1573,11 @@ public final class PptxParser {
 
             Paragraph p = new Paragraph();
             p.align = pr.algn != null ? pr.algn : DocModel.ALIGN_START;
+            // rtl="1": the paragraph runs right to left, but algn l/r stay the literal left/right edge.
+            p.rtl = pr.rtl != null && pr.rtl;
+            if (p.rtl && pr.algn != null && pr.algn != DocModel.ALIGN_CENTER && pr.algn != DocModel.ALIGN_JUSTIFY) {
+                p.align = pr.algn == DocModel.ALIGN_START ? DocModel.ALIGN_END : DocModel.ALIGN_START;
+            }
             p.indLeft = (pr.marL != null ? pr.marL : 0) / EMU_PER_TWIP;
             p.indRight = (pr.marR != null ? pr.marR : 0) / EMU_PER_TWIP;
             p.firstLine = (pr.indent != null ? pr.indent : 0) / EMU_PER_TWIP;
