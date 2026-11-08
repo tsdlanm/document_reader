@@ -5,7 +5,7 @@ Aplikasi Android yang sangat ringan untuk **membaca** dokumen. Ukurannya sekitar
 ## Cara mengunduh dan memasang
 
 1. Buka halaman rilis: **[github.com/tsdlanm/document_reader/releases/latest](https://github.com/tsdlanm/document_reader/releases/latest)**
-2. Di bagian **Assets**, ketuk file **PembacaDokumen-v1.0.apk** (nama versinya mengikuti rilis terbaru) untuk mengunduhnya.
+2. Di bagian **Assets**, ketuk file **PembacaDokumen-v1.1.apk** (nama versinya mengikuti rilis terbaru) untuk mengunduhnya.
 3. Buka file yang sudah diunduh, lalu ketuk **Pasang** (*Install*).
 4. Kalau HP menolak dengan pesan *instal dari sumber tidak dikenal*, ketuk **Pengaturan** pada pesan itu dan izinkan untuk browser atau pengelola file yang Anda pakai. Izin ini bisa dicabut lagi setelah selesai.
 
@@ -43,7 +43,7 @@ Format lama `.doc`, `.xls`, dan `.ppt` belum bisa dibuka. Simpan ulang dulu dari
 
 **Word dan PowerPoint**
 - Tekan lama pada tulisan untuk memblok teks, lalu pilih **Salin**.
-- Menu ⋮ → **Mode baca**: teks ditampilkan mengalir mengikuti lebar layar, lebih nyaman dibaca di HP. Pilih **Tampilan halaman** untuk kembali.
+- Menu â‹® â†’ **Mode baca**: teks ditampilkan mengalir mengikuti lebar layar, lebih nyaman dibaca di HP. Pilih **Tampilan halaman** untuk kembali.
 
 **Excel**
 - Ketuk sebuah sel: isinya muncul di bagian bawah layar.

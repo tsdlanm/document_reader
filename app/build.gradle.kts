@@ -21,8 +21,8 @@ android {
         applicationId = "com.tsdlanm.documentreader"
         minSdk = 23
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
         // Keep only the languages the app is translated to.
         resourceConfigurations += listOf("en", "in")
     }
